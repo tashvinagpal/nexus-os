@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+build/
+dist/
+
+# NEXUS runtime data (audit log, memory database, logs) - never commit
+var/
+
+# Downloaded AI models are large and re-downloadable
+models/*
+!models/README.md
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

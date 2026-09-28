@@ -1,0 +1,64 @@
+# NEXUS settings. Security rules live in policy.toml, not here.
+# A typo or unknown setting stops NEXUS from starting (it never guesses).
+
+[ai]
+ollama_url = "http://127.0.0.1:11434"
+
+# NEXUS works fully offline. No cloud AI provider exists yet; this switch
+# must be turned on explicitly before one could ever be used.
+allow_cloud = false
+
+# On a laptop running on battery, skip heavy models.
+power_saving_on_battery = true
+
+# Unload the language model after this many idle seconds to free memory.
+# Lower = less memory held, but the next answer waits for a reload
+# (measured on this PC: llama3.1:8b cold load 22 s, llama3.2 3 s).
+llm_idle_unload_seconds = 300
+
+# Keep the language model loaded all the time for instant answers.
+# Costs ~5 GB VRAM permanently. Game mode still unloads it.
+keep_llm_loaded = false
+
+# Language models, best first. For each request NEXUS uses the first one that
+# is installed and fits in the RAM/VRAM free *right now* (keeping the reserves
+# below). Sizes were measured on this PC - see docs/architecture.md.
+# Nothing is downloaded automatically.
+
+[[ai.llm]]
+model = "llama3.1:8b"
+placement = "gpu"
+vram_mb = 5100
+ram_mb = 500
+
+[[ai.llm]]
+model = "llama3.2"
+placement = "gpu"
+vram_mb = 2500
+ram_mb = 800
+
+# CPU-only fallback: used in game mode (GPU stays free for the game) or when
+# VRAM is full. Slower (17 tokens/s measured) but works.
+[[ai.llm]]
+model = "llama3.2"
+placement = "cpu"
+ram_mb = 2500
+
+[resources]
+# Memory NEXUS always leaves free for your own apps and games.
+ram_reserve_mb = 2048
+vram_reserve_mb = 1024
+
+[apps]
+# How long to wait for a launched app / game process before saying it couldn't be verified.
+# Games can take a while (GTA V starts through the Rockstar launcher).
+app_launch_timeout_seconds = 20
+game_launch_timeout_seconds = 180
+
+# Enter game mode (unload AI models from the GPU) before launching a game, and whenever a known
+# game is running. Leaves game mode when the game exits; AI models reload only when next needed.
+auto_game_mode = true
+watch_games = true
+
+# Include Store apps (Calculator, Settings, WhatsApp...). Found with a read-only Windows query.
+store_apps = true

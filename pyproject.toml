@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexus-os"
+dynamic = ["version"]
+description = "NEXUS OS - an AI-native operating system (v0.1 Windows development prototype)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "psutil>=5.9",
+    "cryptography>=42",  # Ed25519 device identities and message signatures
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+nexus = "nexus.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
+
+[tool.setuptools.packages.find]
+include = ["nexus*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: uses the real GPU and Ollama models (loads/unloads llama3.1:8b); run with: pytest -m live"]
+addopts = "-m \"not live\""

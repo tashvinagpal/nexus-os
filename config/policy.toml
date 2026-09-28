@@ -1,0 +1,40 @@
+# NEXUS security policy
+#
+# This file can make NEXUS stricter. It cannot unprotect Windows system
+# folders, NEXUS's own files or the audit log - those are built in.
+# If this file has a typo or an unknown setting, NEXUS refuses to start
+# rather than silently running with a weaker policy.
+
+[paths]
+# Extra folders NEXUS must never modify (in addition to the built-in list:
+# Windows, Program Files, ProgramData, AppData, recovery/boot folders).
+# Example: protected = ["D:\\Important", "~\\Documents\\Taxes"]
+protected = []
+
+# Folders where NEXUS may create/modify things without asking.
+# Writing anywhere else (other drives, C:\ top level, ...) asks you first.
+# "~" means your user folder (C:\Users\<you>).
+safe_roots = ["~"]
+
+[tools]
+# Tools that are always refused.
+blocked = []
+
+# Tools that must always ask before running, even if normally SAFE.
+# Example: always_confirm = ["create_folder"]
+always_confirm = []
+
+[remote]
+# Requests from your other paired devices (e.g. your phone). Anything NOT
+# listed here asks for confirmation first - even inside your safe folders.
+# The confirmation can be answered on that device or on this computer.
+allow_without_confirmation = ["get_system_info", "get_datetime"]
+
+# Tools that can never be used from another device.
+blocked = []
+
+# Per-device permissions (each paired device has its own id, shown in /status
+# on that device). Pairing alone grants nothing beyond the defaults above.
+# [remote.devices."nxd-yourphoneid"]
+# allow_without_confirmation = ["get_system_info", "get_datetime", "list_memories"]
+# blocked = ["create_folder"]
