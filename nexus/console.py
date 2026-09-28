@@ -32,6 +32,8 @@ HELP = r"""Talk to NEXUS in English, Hindi, Hinglish or Punjabi - or use a comma
   /aliases, /unalias <name>      your own app names ("Chrome is my browser") and removing one
   /listen  (or Enter on an empty line)   say something - NEXUS stops at your pause; Ctrl+C cancels
   /mic [use <name> | auto]       microphones NEXUS can use, and which one it picked
+  /tts [on | off | test]         voice output: status, turn it on/off, say a test sentence
+  /stop                          stop speaking now (typing or talking also interrupts NEXUS)
   /memory                        everything NEXUS remembers (with ids)
   /forget <id>                   delete one memory by id (first characters are enough)
   /audit [n]  |  /audit verify   show / check the audit log
@@ -89,7 +91,7 @@ class Console:
                     "status": self._status, "gamemode": self._gamemode, "unload": self._unload,
                     "memory": self._memory, "forget": self._forget, "apps": self._apps,
                     "aliases": self._aliases, "unalias": self._unalias, "listen": self._listen,
-                    "l": self._listen, "mic": self._mic}
+                    "l": self._listen, "mic": self._mic, "tts": self._tts, "stop": self._stop_speaking}
         apps = getattr(self.rt, "apps", None)
         if apps is not None:
             apps.subscribe(self._on_app_event)  # e.g. "GTA V is running." after a background launch
@@ -105,6 +107,7 @@ class Console:
             except (EOFError, KeyboardInterrupt):
                 self._out("")
                 return
+            self._interrupt_speech()  # anything new - typing, a command, push-to-talk - interrupts NEXUS
             if not line:
                 if self._voice is not None:
                     self._listen("")  # push-to-talk: Enter on an empty line
@@ -135,6 +138,9 @@ class Console:
         user = (UserInput(text, interface="console") if heard is None
                 else UserInput(heard.text, interface="voice", confidence=heard.confidence,
                                inferred=getattr(heard, "guessed", False)))
+        prepare = getattr(self.speaker, "prepare", None)
+        if prepare is not None:
+            prepare()  # load the voice while NEXUS thinks, so the answer is heard sooner
         self.assistant.engine.handle(user, self._show_event)
         reply = getattr(self.assistant.engine.planner, "last_reply", None)
         if reply is not None and self.assistant.chat.last_choice:
@@ -147,7 +153,10 @@ class Console:
             self._out(f"nexus> {lines[0]}")
             for line in lines[1:]:
                 self._out(f"       {line}")
-            self.speaker(event)
+            try:
+                self.speaker(event)  # an output layer: it can never break the conversation
+            except Exception:
+                logging.getLogger(__name__).exception("voice output failed")
         elif isinstance(event, ActionReport):
             unverified = event.status is Status.DONE and event.verified is None and event.tool != "launch_app"
             note = "  (not independently verifiable)" if unverified else ""
@@ -161,6 +170,61 @@ class Console:
         self._show_event(say)
         if self.assistant is not None:
             self.assistant.engine.history.append("default", ChatMessage("assistant", event.message))
+
+    # --- voice output ---------------------------------------------------------------
+
+    def _interrupt_speech(self) -> None:
+        try:
+            self._interrupted = bool(self.speaker.stop())
+        except Exception:
+            logging.getLogger(__name__).exception("stopping speech failed")
+
+    def _stop_speaking(self, _: str) -> None:
+        # The new input line has already interrupted it (see run()); this only reports.
+        self._out("  (NEXUS stopped speaking)" if getattr(self, "_interrupted", False) else "  (NEXUS wasn't speaking)")
+
+    def _tts(self, rest: str) -> None:
+        speaker = self.speaker
+        cmd, _, arg = rest.partition(" ")
+        if cmd in ("on", "off"):
+            speaker.enabled = cmd == "on"
+            self._out(f"  Voice output {'on' if speaker.enabled else 'off (text only)'}.")
+            return
+        if cmd == "test":
+            if not hasattr(speaker, "say") or not speaker.enabled:
+                self._out("  Voice output is off.")
+                return
+            text = arg.strip() or "Hello, I'm Nexus. This is how I sound."
+            if speaker.say(text):
+                last = speaker.last
+                self._out(f"  (spoke {last.get('characters')} characters; first sound after "
+                          f"{last.get('first_audio_s')} s, done in {last.get('total_s')} s"
+                          + (f", including {last['load_s']} s to load the voice" if last.get("load_s") else "") + ")")
+            else:
+                why = getattr(speaker, "problem", "") or getattr(self.assistant, "speech_note", "") or "not available"
+                self._out(f"  Nothing was spoken: {why}")
+            return
+        if cmd:
+            self._out("  usage: /tts   |   /tts on | off   |   /tts test [text]")
+            return
+        status = speaker.status() if hasattr(speaker, "status") else {}
+        note = getattr(self.assistant, "speech_note", "")
+        self._out(f"  voice output: {'on' if status.get('enabled', True) else 'off'}   provider: "
+                  f"{status.get('provider', speaker.tts.info.name)}"
+                  + (f" ({'loaded' if status.get('loaded') else 'loads when needed'})" if status else ""))
+        if note:
+            self._out(f"  text only: {note}")
+        if status.get("output"):
+            self._out(f"  output: {status['output']} (the Windows default output)")
+        elif status.get("output_problem"):
+            self._out(f"  output: none - {status['output_problem']}")
+        if status.get("problem"):
+            self._out(f"  last problem: {status['problem']}")
+        last = status.get("last") or {}
+        if last.get("total_s") is not None:
+            self._out(f"  last reply: {last.get('characters')} characters, first sound after "
+                      f"{last.get('first_audio_s')} s, {last.get('total_s')} s in total"
+                      + (" (stopped)" if last.get("stopped") else ""))
 
     # --- voice ---------------------------------------------------------------------
 
@@ -330,6 +394,13 @@ class Console:
             scan = voice.mics.last_scan or voice.mics.scan()
             mic = scan.chosen.name if scan.chosen else "no microphone connected"
             self._out(f"  voice input: {mic}   (/listen or Enter to talk, /mic for details)")
+        speaker = getattr(a, "speaker", None)
+        if getattr(a, "speech_note", ""):
+            self._out(f"  voice output: off ({a.speech_note})")
+        elif speaker is not None and hasattr(speaker, "status"):
+            st = speaker.status()
+            where = st.get("output") or f"no output ({st.get('output_problem')})"
+            self._out(f"  voice output: {'on' if st['enabled'] else 'off'} - {st['provider']} -> {where}   (/tts)")
 
     def _gamemode(self, rest: str) -> None:
         if self.assistant is None:

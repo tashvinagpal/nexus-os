@@ -6,12 +6,13 @@ import os
 import platform as _stdlib_platform
 import re
 import subprocess
+import threading
 import uuid
 from ctypes import wintypes
 from pathlib import Path
 from typing import Iterable
 
-from nexus.system.platform.base import AudioInput, LaunchError, LaunchMethod, LaunchSpec
+from nexus.system.platform.base import AudioInput, AudioOutput, LaunchError, LaunchMethod, LaunchSpec
 
 # Windows known-folder ids (correct even when Desktop/Documents are redirected to OneDrive).
 _KNOWN_FOLDERS = {
@@ -126,6 +127,40 @@ def _audio_bus(enumerator: str) -> str:
     return "other"
 
 
+_E_RENDER = 0
+_OUTPUT_FORM_FACTORS = {1: "speakers", 3: "headphones", 5: "headset", 6: "handset", 9: "display", 8: "spdif",
+                        7: "spdif", 2: "line_out", 10: "unknown"}
+
+
+def _endpoint_properties(device: ctypes.c_void_p, ole, keys: dict[str, tuple[str, int]]) -> dict[str, object]:
+    """Read some properties of an audio endpoint (IMMDevice::OpenPropertyStore, read-only)."""
+    store = ctypes.c_void_p()
+    _com(device, 4, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p))(0, ctypes.byref(store))  # STGM_READ
+    values: dict[str, object] = {}
+    try:
+        for name, key in keys.items():
+            pk = _PROPERTYKEY(_guid(key[0]), key[1])
+            pv = _PROPVARIANT()
+            try:
+                _com(store, 5, ctypes.POINTER(_PROPERTYKEY), ctypes.POINTER(_PROPVARIANT))(
+                    ctypes.byref(pk), ctypes.byref(pv))  # IPropertyStore::GetValue
+            except OSError:
+                values[name] = None
+                continue
+            try:
+                if pv.vt == 31:  # VT_LPWSTR
+                    values[name] = ctypes.wstring_at(pv.value) if pv.value else ""
+                elif pv.vt == 19:  # VT_UI4
+                    values[name] = (pv.value or 0) & 0xFFFFFFFF
+                else:
+                    values[name] = None
+            finally:
+                ole.PropVariantClear(ctypes.byref(pv))
+    finally:
+        _com_release(store)
+    return values
+
+
 _MIC_CONSENT = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
 
 
@@ -140,6 +175,76 @@ class WindowsPlatform:
         if any(v == "Deny" for v in values):
             return False
         return True if any(v == "Allow" for v in values) else None
+
+    _audio_threads = threading.local()
+
+    def prepare_audio_thread(self) -> None:
+        """WASAPI playback from a thread needs COM initialised on that thread for as long as it plays
+        (measured: without it, streams opened from NEXUS's speech thread fail to start with
+        AUDCLNT_E_UNSUPPORTED_FORMAT). Initialised once per thread and kept; the OS releases it
+        when the thread ends."""
+        if getattr(self._audio_threads, "ready", False):
+            return
+        hr = _ole32().CoInitializeEx(None, 0x0)  # COINIT_MULTITHREADED
+        if hr >= 0 or hr == _RPC_E_CHANGED_MODE:  # S_OK / S_FALSE / already initialised another way
+            self._audio_threads.ready = True
+
+    def audio_outputs(self) -> list[AudioOutput]:
+        """Playback endpoints (Core Audio, eRender); microphones are never listed here."""
+        ole = _ole32()
+        hr = ole.CoInitializeEx(None, 0x0)  # COINIT_MULTITHREADED
+        if hr < 0 and hr != _RPC_E_CHANGED_MODE:
+            raise OSError(f"COM initialisation failed (0x{hr & 0xFFFFFFFF:08X})")
+        enumerator = ctypes.c_void_p()
+        try:
+            ole.CoCreateInstance(ctypes.byref(_guid(_CLSID_MM_DEVICE_ENUMERATOR)), None, 0x17,  # CLSCTX_ALL
+                                 ctypes.byref(_guid(_IID_IMM_DEVICE_ENUMERATOR)), ctypes.byref(enumerator))
+            defaults = {}
+            for role in (_ROLE_CONSOLE, _ROLE_COMMUNICATIONS):
+                device = ctypes.c_void_p()
+                try:
+                    _com(enumerator, 4, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))(
+                        _E_RENDER, role, ctypes.byref(device))
+                    defaults[role] = self._device_id(device, ole)
+                except OSError:  # no active output at all
+                    defaults[role] = None
+                finally:
+                    _com_release(device)
+            collection = ctypes.c_void_p()
+            _com(enumerator, 3, ctypes.c_int, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p))(
+                _E_RENDER, 0x1 | 0x2 | 0x8, ctypes.byref(collection))  # active | disabled | unplugged
+            outputs: list[AudioOutput] = []
+            try:
+                count = wintypes.UINT()
+                _com(collection, 3, ctypes.POINTER(wintypes.UINT))(ctypes.byref(count))
+                for i in range(count.value):
+                    device = ctypes.c_void_p()
+                    try:
+                        _com(collection, 4, wintypes.UINT, ctypes.POINTER(ctypes.c_void_p))(i, ctypes.byref(device))
+                        endpoint_id = self._device_id(device, ole)
+                        state = wintypes.DWORD()
+                        _com(device, 6, ctypes.POINTER(wintypes.DWORD))(ctypes.byref(state))  # GetState
+                        props = _endpoint_properties(device, ole, {"name": _PK_FRIENDLY_NAME, "enumerator": _PK_ENUMERATOR,
+                                                                   "form": _PK_FORM_FACTOR})
+                    except OSError:
+                        continue  # unplugged while we were looking
+                    finally:
+                        _com_release(device)
+                    form = props.get("form")
+                    outputs.append(AudioOutput(
+                        id=endpoint_id, name=str(props.get("name") or "Unknown output"),
+                        state=_DEVICE_STATES.get(state.value & 0xF, "unknown"),
+                        form_factor=_OUTPUT_FORM_FACTORS.get(form if isinstance(form, int) else -1, "other"),
+                        bus=_audio_bus(str(props.get("enumerator") or "")),
+                        default=endpoint_id == defaults[_ROLE_CONSOLE],
+                        default_communications=endpoint_id == defaults[_ROLE_COMMUNICATIONS]))
+            finally:
+                _com_release(collection)
+            return outputs
+        finally:
+            _com_release(enumerator)
+            if hr >= 0:
+                ole.CoUninitialize()
 
     def audio_inputs(self) -> list[AudioInput]:
         ole = _ole32()

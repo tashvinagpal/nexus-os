@@ -118,3 +118,36 @@ compute_type = "int8"
 threads = 2
 ram_mb = 320
 game_mode = true
+
+[tts]
+# Voice output: NEXUS speaks its replies through the Windows default audio output (speakers,
+# headphones...). Local and offline; nothing is sent anywhere. The text is always shown too,
+# and typing or talking interrupts it (/stop, /tts off). Speech never runs anything.
+enabled = true
+provider = "kokoro"
+
+# Kokoro-82M model file. Download: .venv\Scripts\python.exe scripts\get_tts_model.py fp32
+# Measured on this PC (i5-12400F, CPU): fp32 ~0.5 s per short sentence, ~570 MB RAM while loaded;
+# int8 uses ~370 MB but is 3x slower here. See docs/tts.md.
+model = "fp32"
+
+# Voices (Kokoro names). English: af_heart, af_bella, am_michael... Hindi: hf_alpha, hf_beta, hm_omega, hm_psi.
+voice = "af_heart"
+hindi_voice = "hf_alpha"
+
+# Hinglish/Punjabi written in English letters: "hindi" converts it to Devanagari for the Hindi voice
+# (much clearer); "english" reads it with the English voice.
+romanized = "hindi"
+
+speed = 1.0
+volume = 1.0
+placement = "cpu"      # the GPU is left to games and the language model
+threads = 0            # 0 = automatic
+ram_mb = 600           # measured peak of the voice process
+idle_unload_seconds = 120
+
+# While a game runs: "quiet" (text only, the voice model is freed) or "speak".
+game_mode = "quiet"
+
+# Longer replies are spoken up to about this many characters, then "The rest is on the screen."
+max_spoken_chars = 600

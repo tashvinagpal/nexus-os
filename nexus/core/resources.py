@@ -156,7 +156,10 @@ class ResourceManager:
         self._snapshot_ttl = snapshot_ttl
         self._snapshot: tuple[float, ResourceSnapshot] | None = None
         self._slots: dict[str, _Slot] = {}
-        self._activity = ResourceState.IDLE
+        # What NEXUS is doing, newest last. A list rather than one saved value because activities
+        # can overlap on different threads (speaking in the background while you type).
+        self._activities: list[tuple[object, ResourceState]] = []
+        self._activity_lock = threading.Lock()  # never the model lock: loading a model takes seconds
         self._game_mode = False
         self._lock = threading.RLock()
         self._housekeeper: threading.Thread | None = None
@@ -165,11 +168,12 @@ class ResourceManager:
 
     @property
     def state(self) -> ResourceState:
-        return ResourceState.GAME_MODE if self._game_mode else self._activity
+        return ResourceState.GAME_MODE if self._game_mode else self.activity
 
     @property
     def activity(self) -> ResourceState:
-        return self._activity
+        activities = self._activities
+        return activities[-1][1] if activities else ResourceState.IDLE
 
     @property
     def game_mode(self) -> bool:
@@ -180,11 +184,14 @@ class ResourceManager:
         """Mark what NEXUS is doing for the duration of a block."""
         if state is ResourceState.GAME_MODE:
             raise ValueError("use enter_game_mode() for game mode")
-        previous, self._activity = self._activity, state
+        token = object()
+        with self._activity_lock:
+            self._activities.append((token, state))
         try:
             yield
         finally:
-            self._activity = previous
+            with self._activity_lock:
+                self._activities = [a for a in self._activities if a[0] is not token]
 
     def enter_game_mode(self) -> list[str]:
         """Give the GPU to the game: unload every idle NEXUS model on the GPU."""
@@ -320,7 +327,7 @@ class ResourceManager:
                 "unloads_in_s": (max(0, round(spec.idle_unload_s - idle))
                                  if loaded and not slot.in_use and not keep else None),
             })
-        return {"state": self.state.value, "activity": self._activity.value, "game_mode": self._game_mode,
+        return {"state": self.state.value, "activity": self.activity.value, "game_mode": self._game_mode,
                 "resources": asdict(self.snapshot()), "models": models,
                 "device": self.capabilities.to_dict() if self.capabilities else None}
 

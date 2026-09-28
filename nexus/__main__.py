@@ -9,7 +9,7 @@ import sys
 from nexus import __version__
 from nexus.console import Console
 from nexus.core.config import (ConfigError, load_ai_settings, load_app_settings, load_settings,
-                               load_voice_settings)
+                               load_tts_settings, load_voice_settings)
 from nexus.core.resources import ResourceManager
 from nexus.core.runtime import create_runtime
 from nexus.security.permissions import PolicyError
@@ -38,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         ai = load_ai_settings(settings.config_file)
         voice = load_voice_settings(settings.config_file)
+        speech = load_tts_settings(settings.config_file)
         resources = ResourceManager(ram_reserve_mb=ai.ram_reserve_mb, vram_reserve_mb=ai.vram_reserve_mb)
         runtime = create_runtime(settings, plat, resources=resources,
                                  app_settings=load_app_settings(settings.config_file))
@@ -47,12 +48,16 @@ def main(argv: list[str] | None = None) -> int:
         if not args.no_ai:
             from nexus.core.assistant import create_assistant
 
-            assistant = create_assistant(runtime, ai, voice=voice)
+            assistant = create_assistant(runtime, ai, voice=voice, speech=speech)
     except (PolicyError, ConfigError, RuntimeError) as exc:
         print(f"NEXUS did not start: {exc}")
         return 1
     logging.getLogger(__name__).info("NEXUS %s started", __version__)
-    Console(runtime, assistant).run()
+    try:
+        Console(runtime, assistant).run()
+    finally:
+        if assistant is not None:
+            assistant.speaker.stop()  # (model worker processes end by themselves when NEXUS closes their pipe)
     return 0
 
 

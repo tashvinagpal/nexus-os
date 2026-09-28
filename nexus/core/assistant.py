@@ -14,8 +14,8 @@ from nexus.ai.providers.ollama import OllamaChat
 from nexus.ai.router import FastPathRouter
 from nexus.ai.voice import SilentTTS, TTSProvider
 from nexus.ai.voice.speaker import Speaker
-from nexus.core.config import AISettings, VoiceSettings
-from nexus.core.resources import Placement, ResourceManager
+from nexus.core.config import AISettings, TTSSettings, VoiceSettings
+from nexus.core.resources import Placement, ResourceManager, ResourceState
 from nexus.core.runtime import Runtime
 from nexus.security.identity import DeviceKey, NexusIdentity
 from nexus.system.device import DeviceCapabilities, detect_capabilities
@@ -33,6 +33,7 @@ class Assistant:
     speaker: Speaker
     voice: object = None      # VoiceInput, or None when voice input is turned off
     voice_note: str = ""      # why voice input is off
+    speech_note: str = ""     # why NEXUS answers in text only (no voice output)
 
 
 def _stt_backends(runtime: Runtime, voice: VoiceSettings | None) -> list:
@@ -61,6 +62,36 @@ def _app_names(runtime: Runtime):
     return names
 
 
+def _tts_provider(runtime: Runtime, speech: TTSSettings | None):
+    """The configured voice, or (None, why not). Nothing is loaded here - only on the first reply."""
+    if speech is None or not speech.enabled:
+        return None, "voice output is turned off in config/nexus.toml ([tts] enabled)"
+    from nexus.ai.voice.kokoro import KokoroTTS
+
+    auto_threads = max(1, min(4, (os.cpu_count() or 2) // 3))
+    provider = KokoroTTS(speech.model, voices={"en": speech.voice, "hi": speech.hindi_voice}, speed=speech.speed,
+                         volume=speech.volume, threads=speech.threads or auto_threads,
+                         placement=Placement(speech.placement), ram_mb=speech.ram_mb,
+                         idle_unload_s=speech.idle_unload_seconds,
+                         log_file=runtime.settings.data_dir / "logs" / "tts-worker.log")
+    if not provider.available():
+        return None, provider.problem
+    return provider, ""
+
+
+def _speaker(runtime: Runtime, provider, speech: TTSSettings | None, resources: ResourceManager) -> Speaker:
+    from nexus.ai.voice.speaker import SpeechSettings
+    from nexus.system.audio.playback import PortAudioSink
+
+    # The OS default output (speakers, headphones...), re-read before each reply; never while recording.
+    sink = PortAudioSink(getattr(runtime.platform, "audio_outputs", None),
+                         can_refresh=lambda: resources.activity is not ResourceState.LISTENING,
+                         prepare_thread=getattr(runtime.platform, "prepare_audio_thread", None))
+    settings = SpeechSettings(enabled=speech.enabled, max_chars=speech.max_spoken_chars,
+                              game_mode=speech.game_mode, romanized=speech.romanized)
+    return Speaker(provider, resources, sink=sink, settings=settings, names=_app_names(runtime))
+
+
 def _voice_input(runtime: Runtime, voice: VoiceSettings, stt_backends: list, resources: ResourceManager,
                  context, *, fast_path=None) -> object:
     from nexus.ai.voice.listener import VoiceInput
@@ -85,14 +116,16 @@ def _voice_input(runtime: Runtime, voice: VoiceSettings, stt_backends: list, res
 
 
 def create_assistant(runtime: Runtime, ai: AISettings, *, tts: TTSProvider | None = None,
-                     voice: VoiceSettings | None = None) -> Assistant:
+                     voice: VoiceSettings | None = None, speech: TTSSettings | None = None) -> Assistant:
     idle = math.inf if ai.keep_llm_loaded else ai.llm_idle_unload_seconds
     providers = [OllamaChat(o.model, placement=Placement(o.placement), ram_mb=o.ram_mb, vram_mb=o.vram_mb,
                             idle_unload_s=idle, base_url=ai.ollama_url) for o in ai.llm]  # best first
     stt_backends = _stt_backends(runtime, voice)
+    tts_provider, speech_note = (tts, "") if tts is not None else _tts_provider(runtime, speech)
+    tts_specs = [tts_provider.spec] if hasattr(tts_provider, "spec") else []
 
     caps = detect_capabilities(cpu_name=runtime.platform.cpu_name(),
-                               model_specs=[p.spec for p in providers] + [b.spec for b in stt_backends],
+                               model_specs=[p.spec for p in providers] + [b.spec for b in stt_backends] + tts_specs,
                                ram_reserve_mb=ai.ram_reserve_mb, vram_reserve_mb=ai.vram_reserve_mb)
     ident_dir = runtime.settings.identity_dir
     device = DeviceKey.load_or_create(ident_dir / "device.json",
@@ -132,7 +165,10 @@ def create_assistant(runtime: Runtime, ai: AISettings, *, tts: TTSProvider | Non
     engine = ConversationEngine(runtime.kernel, planner, resources=resources, memory=runtime.memory,
                                 router=router,
                                 voice_confirm_min_confidence=voice.confirm_min_confidence if voice else 0.6)
-    speaker = Speaker(tts or SilentTTS(), resources)
+    if tts_provider is not None and tts is None and speech is not None:
+        speaker = _speaker(runtime, tts_provider, speech, resources)
+    else:
+        speaker = Speaker(tts_provider or SilentTTS(), resources)
     voice_input, voice_note = None, "voice input is turned off in config/nexus.toml"
     if voice is not None and voice.enabled:
         if not stt_backends:
@@ -141,4 +177,5 @@ def create_assistant(runtime: Runtime, ai: AISettings, *, tts: TTSProvider | Non
             voice_input, voice_note = _voice_input(runtime, voice, stt_backends, resources, context,
                                                    fast_path=lambda text: router.route(text) is not None), ""
     resources.start_housekeeping()
-    return Assistant(ai, caps, device, nexus, resources, chat, engine, speaker, voice_input, voice_note)
+    return Assistant(ai, caps, device, nexus, resources, chat, engine, speaker, voice_input, voice_note,
+                     speech_note)

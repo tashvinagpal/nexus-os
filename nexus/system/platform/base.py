@@ -23,6 +23,19 @@ class LaunchSpec:
     working_dir: str | None = None
 
 
+@dataclass(frozen=True)
+class AudioOutput:
+    """An audio playback endpoint as the OS reports it (speakers, headphones, a monitor's speakers...)."""
+
+    id: str
+    name: str                      # "Speakers (Realtek(R) Audio)"
+    state: str = "active"          # active | disabled | unplugged
+    form_factor: str = "unknown"   # speakers | headphones | headset | display | spdif | line_out | unknown | other
+    bus: str = "other"             # builtin | usb | bluetooth | virtual | other
+    default: bool = False          # the OS default output
+    default_communications: bool = False
+
+
 class LaunchError(OSError):
     """The OS refused to start it (missing file, needs administrator rights, ...)."""
 
@@ -120,4 +133,12 @@ class Platform(Protocol):
 
     def microphone_allowed(self) -> bool | None:
         """False if the OS privacy settings block microphone access for this app; None if unknown."""
+        ...
+
+    def audio_outputs(self) -> list[AudioOutput]:
+        """Every audio playback endpoint that is active, disabled or unplugged. Never opens a device."""
+        ...
+
+    def prepare_audio_thread(self) -> None:
+        """Make the calling thread able to play audio (Windows: COM for WASAPI). Safe to call repeatedly."""
         ...

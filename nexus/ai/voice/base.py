@@ -80,14 +80,51 @@ class STTProvider(Protocol):
         ...
 
 
+class TTSError(Exception):
+    """Speech output failed (engine missing, model not loaded, synthesis error). Never fatal."""
+
+
+@dataclass(frozen=True)
+class TTSCapabilities:
+    languages: tuple[str, ...] = ()        # NEXUS language keys it can speak: "en", "hi", ...
+    voices: tuple[str, ...] = ()
+    sample_rates: tuple[int, ...] = ()
+    supports_streaming: bool = False       # audio before the whole text is synthesized
+    supports_ssml: bool = False
+
+
+@dataclass(frozen=True)
+class HealthReport:
+    ok: bool
+    detail: str = ""
+
+
 class TTSProvider(Protocol):
-    """Replaceable voice output. Providers with a model also implement ModelBackend
-    (spec/load/unload/is_loaded) so the ResourceManager controls when it is in memory."""
+    """Replaceable voice output (Kokoro today; Piper or a cloud voice could implement it too).
+
+    A provider turns text into audio (`synthesize`); the Speaker (nexus/ai/voice/speaker.py)
+    prepares the text, splits it into sentences and plays the audio, so no provider needs to
+    know about audio devices. Providers with a model also implement ModelBackend
+    (spec/load/unload/is_loaded) so the ResourceManager controls when it is in memory.
+    A cloud provider would only ever run if the user enabled cloud AI - none exists.
+    """
 
     info: ProviderInfo
 
+    def available(self) -> bool: ...
+
+    def capabilities(self) -> TTSCapabilities: ...
+
+    def health_check(self) -> HealthReport: ...
+
+    def synthesize(self, text: str, *, language: str | None = None, voice: str | None = None,
+                   speed: float | None = None) -> AudioClip:
+        """Audio for this text. Raises TTSError instead of returning silence."""
+        ...
+
     def speak(self, text: str, *, language: str | None = None) -> None:
-        """Speak and return when finished. stop() from another thread interrupts."""
+        """Synthesize and play through the default output, returning when finished (simple uses;
+        NEXUS itself speaks through the Speaker)."""
         ...
 
     def stop(self) -> None:
@@ -99,6 +136,15 @@ class SilentTTS:
     """Text-only output: used when no voice is configured. Says nothing, honestly."""
 
     info = ProviderInfo(name="tts:silent", locality=Locality.LOCAL)
+
+    def available(self) -> bool:
+        return True
+
+    def capabilities(self) -> TTSCapabilities:
+        return TTSCapabilities()
+
+    def health_check(self) -> HealthReport:
+        return HealthReport(True, "text only (no voice configured)")
 
     def speak(self, text: str, *, language: str | None = None) -> None:
         pass

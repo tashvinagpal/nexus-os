@@ -104,8 +104,7 @@ Resource requirements (same file, `test_R*`):
 | voice goes through the same engine and kernel; confirmations still required; a misheard "yes" never approves; a phone can't answer | `test_voice_conversation.py` |
 | console: push-to-talk, errors shown and NEXUS keeps running | `test_voice_conversation.py::test_console_*`, `test_unexpected_voice_failure_*` |
 | real speech end to end: spoken request -> kernel, no language model loaded | live `test_V04_*` |
-| real microphone: opens and delivers audio; spoken request end to end | `test_voice_mic.py` M01, M02 - **PENDING (no physical microphone connected)** |
-
+| real microphone: opens and delivers audio; spoken request end to end | `test_voice_mic.py` M01, M02 (passed with the USB microphone, see results) |
 | uncertain speech (confidence < 0.6 or a sound-alike guess) asks before any action that changes something | `test_voice_conversation.py` |
 | spoken yes/no in five languages; a no always cancels; an unclear or guessed yes never approves ("haan ji" heard as "anji") | `test_responder.py`, `test_voice_conversation.py` |
 | real-speaker transcripts -> requests; English never rewritten | `test_voice_normalize.py` |
@@ -128,3 +127,35 @@ Resource requirements (same file, `test_R*`):
 | whisper-small | load 2.2 s (while you speak); 390-412 MB RAM loaded, ~550 MB peak; 0 VRAM; unload 0.07 s, process gone; 0 % CPU when idle |
 | idle NEXUS with voice on | 38 MB RAM, 0.13 % of one CPU core, 0 VRAM |
 | planner (78 phrases, after the dialect hint) | system 97.4 %, the same two misses as at the Subsystem 4 freeze |
+
+## Subsystem 6 (voice output / text-to-speech) - details in [tts.md](tts.md)
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -m tts       # the real Kokoro model, nothing played
+.\.venv\Scripts\python.exe -m pytest -m speaker   # plays through the real output (you hear it)
+```
+
+| Requirement | Tests |
+|---|---|
+| TTS provider abstraction: synthesize, speak, stop, available, capabilities, health check; replaceable engine | `test_kokoro.py`, `test_speaker.py` (fake provider) |
+| local, offline provider; model loaded lazily, reused, unloaded when idle, reloaded; failure recovery | `test_speaker.py`, `test_kokoro.py`, live `test_T01_*`, `test_T08_*` |
+| text prepared for speech (markdown, code, URLs, paths, emoji, units, long replies, chunking); the reply itself unchanged | `test_speech_text.py`, `test_speaker.py::test_markdown_*` |
+| languages: English, Hindi, Hinglish (converted for the Hindi voice), Punjabi (approximate) | `test_speech_text.py`, `test_speaker.py::test_voice_follows_*`, live `test_T04_*`, `test_T09_*` |
+| default output device; no device; device change; stalled device; microphones never used as outputs | `test_playback.py` |
+| stop at once; speak -> stop -> speak again repeatedly; queued replies; a new interaction interrupts | `test_speaker.py`, `test_tts_integration.py::test_typing_interrupts_speech`, hardware `test_H02_*` |
+| never talks over the microphone; quiet in game mode (model freed); thread-safe resource state | `test_speaker.py` |
+| keyboard -> assistant -> speech; voice -> assistant -> speech; speech failure never breaks the assistant | `test_tts_integration.py` |
+| speech can never run anything (no path to the kernel, tools or processes) | `test_speaker.py::test_speech_can_never_run_anything` |
+| real output: plays, stops, works from the speech thread after the microphone used audio | `test_tts_hardware.py` H01-H03 |
+
+### Results (2026-09-28) - Subsystem 6, awaiting review (not frozen)
+
+| | |
+|---|---|
+| normal suite | 1078 passed, 0 failed (955 before Subsystem 6 + 123 new) |
+| live TTS suite | 12 passed (real Kokoro fp32; Kokoro -> Whisper round trip word for word in English) |
+| real output (`-m speaker`) | 3 passed on Speakers (AB13X USB Audio): spoke, stopped 20 ms after `stop()`, background-thread playback 4/4 |
+| Subsystem 4 regression | 268 passed + live suite 11 passed |
+| Subsystem 5 regression | 419 passed (default) + live voice 14 passed + real microphone M01 passed |
+| first sound | 0.62-0.75 s with the voice loaded; 2.3 s for the very first reply (1.6-1.8 s load) |
+| resources | voice process 440-580 MB RAM while loaded, 0 VRAM, 0 % CPU when idle, unload 0.07 s; idle NEXUS 38 MB |

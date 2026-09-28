@@ -86,7 +86,7 @@ def load_ai_settings(file: Path) -> AISettings:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"cannot read {file}: {exc}") from exc
     for section in data:
-        if section not in ("ai", "resources", "apps", "voice"):
+        if section not in ("ai", "resources", "apps", "voice", "tts"):
             raise ConfigError(f"{file}: unknown section [{section}]")
     ai = _checked(data.get("ai", {}), _AI_KEYS, "ai", file)
     res = _checked(data.get("resources", {}), _RES_KEYS, "resources", file)
@@ -202,6 +202,57 @@ def load_voice_settings(file: Path) -> VoiceSettings:
     if language != "auto" and language not in languages:
         raise ConfigError(f"{file}: voice.language must be \"auto\" or one of voice.languages")
     return VoiceSettings(**voice, languages=tuple(languages), language=language, stt=tuple(options))
+
+
+# --- voice output ([tts] in config/nexus.toml) ------------------------------------------
+
+@dataclass(frozen=True)
+class TTSSettings:
+    enabled: bool = True
+    provider: str = "kokoro"
+    model: str = "fp32"                # kokoro model file: fp32 | int8 (see docs/tts.md for the difference)
+    voice: str = "af_heart"            # English voice
+    hindi_voice: str = "hf_alpha"
+    romanized: str = "hindi"           # Hinglish/Punjabi in Latin letters: hindi (converted, Hindi voice) | english
+    speed: float = 1.0
+    volume: float = 1.0
+    placement: str = "cpu"
+    threads: int = 0                   # 0 = automatic
+    ram_mb: int = 700                  # measured, see docs/tts.md
+    idle_unload_seconds: int = 120
+    game_mode: str = "quiet"           # quiet: text only while a game runs | speak
+    max_spoken_chars: int = 600
+
+
+_TTS_KEYS = {"enabled": bool, "provider": str, "model": str, "voice": str, "hindi_voice": str, "romanized": str,
+             "speed": float, "volume": float, "placement": str, "threads": int, "ram_mb": int,
+             "idle_unload_seconds": int, "game_mode": str, "max_spoken_chars": int}
+_TTS_CHOICES = {"provider": ("kokoro",), "model": ("fp32", "int8", "fp16"), "romanized": ("english", "hindi"),
+                "placement": ("cpu", "gpu"), "game_mode": ("quiet", "speak")}
+_TTS_RANGES = {"speed": (0.5, 2.0), "volume": (0.0, 1.0), "threads": (0, 64), "ram_mb": (50, 8192),
+               "idle_unload_seconds": (10, 3600), "max_spoken_chars": (50, 5000)}
+
+
+def load_tts_settings(file: Path) -> TTSSettings:
+    """The [tts] section of config/nexus.toml (same fail-closed rules as the rest of the file)."""
+    if not file.exists():
+        return TTSSettings()
+    try:
+        with file.open("rb") as f:
+            raw = tomllib.load(f).get("tts", {})
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"cannot read {file}: {exc}") from exc
+    tts = _checked(raw, _TTS_KEYS, "tts", file)
+    for key, choices in _TTS_CHOICES.items():
+        if key in tts and tts[key] not in choices:
+            raise ConfigError(f"{file}: tts.{key} must be one of {', '.join(choices)}")
+    for key, (low, high) in _TTS_RANGES.items():
+        if key in tts and not low <= tts[key] <= high:
+            raise ConfigError(f"{file}: tts.{key} must be between {low} and {high}")
+    for key in ("voice", "hindi_voice"):
+        if key in tts and not re.fullmatch(r"[a-z]{2}_[a-z]+", tts[key]):
+            raise ConfigError(f"{file}: tts.{key} must be a voice name like \"af_heart\"")
+    return TTSSettings(**tts)
 
 
 def _checked(values: Any, spec: dict[str, type], name: str, file: Path) -> dict[str, Any]:
