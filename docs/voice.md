@@ -330,6 +330,8 @@ $env:NEXUS_MIC_SPEAK=1; .\.venv\Scripts\python.exe -m pytest -m mic   # ...and s
 | config validation | `test_voice_config.py` |
 | real models (V01-V07), real microphone (M01-M02) | `test_voice_live.py`, `test_voice_mic.py` |
 
+**Subsystem 5 is FROZEN** (2026-09-28): no further feature additions; only fixes.
+
 ## Not in Subsystem 5
 
 - **Real-microphone test with a USB microphone (AB13X), 2026-09-28:**

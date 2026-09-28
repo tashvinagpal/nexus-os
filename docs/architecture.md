@@ -199,7 +199,7 @@ nexus-os/
 | 2b | Acceptance criteria as tests; fast path; capabilities; per-device permissions | done |
 | 3 | Memory (SQLite, local-first scopes) - [memory.md](memory.md) | done |
 | 4 | App & game discovery, verified launch/close, async game launch, aliases - [apps.md](apps.md) | done, FROZEN |
-| 5 | Voice input: STT (push-to-talk) behind `STTProvider`, automatic microphones - [voice.md](voice.md) | done, real microphone + real speaker tested; ready to freeze |
+| 5 | Voice input: STT (push-to-talk) behind `STTProvider`, automatic microphones - [voice.md](voice.md) | done, real microphone + real speaker tested, FROZEN |
 | 6 | TTS behind `TTSProvider` | |
 | 7 | Wake word | |
 | 8 | HUD (Qt/QML): orb, transcript, confirmation buttons | |

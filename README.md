@@ -4,7 +4,7 @@ A computer operating system with an AI-native control layer. Built in stages:
 a normal Windows application first (v0.1), then a Linux-based environment
 (v0.9), then a bootable OS (v1.0). See [docs/architecture.md](docs/architecture.md).
 
-## Status: v0.1 - subsystems 1-5 done (Subsystem 4 frozen), acceptance criteria automated
+## Status: v0.1 - subsystems 1-5 done (Subsystems 4 and 5 frozen), acceptance criteria automated
 
 - **Apps & games** - discovers what's installed (Start menu, Desktop, Store,
   Steam, Epic, Rockstar); "open Chrome" / "GTA chala de" launch the real program

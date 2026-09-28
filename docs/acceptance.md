@@ -111,7 +111,7 @@ Resource requirements (same file, `test_R*`):
 | real-speaker transcripts -> requests; English never rewritten | `test_voice_normalize.py` |
 | bounded decoding; unsure language -> both tried | `test_whisper_worker.py` |
 
-### Results (2026-09-28) - Subsystem 5 READY TO FREEZE
+### Results (2026-09-28) - Subsystem 5 FROZEN
 
 | | |
 |---|---|
