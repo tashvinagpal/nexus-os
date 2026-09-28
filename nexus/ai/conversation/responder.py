@@ -81,19 +81,38 @@ _ASK = {"en": "Should I go ahead? (yes/no)", "hinglish": "Kar doon? (haan/nahi)"
 
 # --- confirmation answers (deterministic, never the language model) --------------
 
+# Hindi, Hinglish, Punjabi and Haryanvi forms, in Latin letters (as typed, or romanized from speech)
+# and in Devanagari/Gurmukhi. Saying no is always safe, so NO wins over YES in the same answer.
 _FILLER = {"nexus", "bhai", "yaar", "please", "plz", "pls", "ji", "sir", "boss", "bro", "then", "toh", "it",
-           "that", "ahead", "go", "do", "kar", "karo", "de", "hai",
-           "na",  # Hinglish softener: "kar de na" means "please do it"
-           "है", "जी", "भाई", "करो", "कर", "दो", "ਜੀ", "ਹੈ"}
-_YES = {"yes", "y", "yeah", "yep", "yup", "sure", "ok", "okay", "haan", "han", "haa", "hanji", "haanji",
-        "theek", "thik", "chalo", "confirm", "kardo", "karde", "हाँ", "हां", "ठीक", "ਹਾਂ", "ਠੀਕ"}
-_NO = {"no", "n", "nope", "nah", "nahi", "nahin", "nai", "mat", "cancel", "stop", "ruk", "ruko",
-       "rehne", "rehnede", "dont", "don't", "नहीं", "मत", "रुको", "ਨਹੀਂ", "ਨਾ"}
-_YES_PHRASES = ("go ahead", "do it", "kar do", "kar de", "kar dijiye", "theek hai", "thik hai", "कर दो", "ठीक है")
+           "that", "ahead", "go", "do", "kar", "karo", "de", "hai", "dena", "dijiye", "chahiye", "chahie", "chaiye", "abhi",
+           "na",  # Hinglish softener: "kar de na" means "please do it" (alone, "na" means no - see below)
+           "a", "an", "uh", "um", "hmm",  # hesitation ("अ, कर दो": the model often drops the h of "haan")
+           "dio", "diyo", "deo", "aa", "sai", "se", "thanks", "thank", "you",  # Punjabi / Haryanvi forms
+           "है", "जी", "भाई", "करो", "कर", "दो", "दे", "चाहिए", "अभी", "सै", "अ", "अन", "ਜੀ", "ਹੈ", "ਕਰ", "ਦਿਓ", "ਦੇ", "ਆ"}
+_YES = {"yes", "y", "yeah", "yep", "yup", "sure", "ok", "okay", "haan", "han", "haa", "haanji", "hanji",
+        "theek", "thik", "chalo", "confirm", "kardo", "karde", "bilkul", "zaroor", "jaroor",
+        # "haan ji" as speech recognition writes it: the h is often lost ("अंजी" in the real test)
+        "anji", "aanji", "haanjee", "hanjee", "anjee",
+        "हाँ", "हां", "ठीक", "बिल्कुल", "ਹਾਂ", "ਠੀਕ", "अंजी", "आंजी", "हांजी", "हाँजी", "ਹਾਂਜੀ"}
+_NO = {"no", "n", "nope", "nah", "nahi", "nahin", "nai", "nahiin", "mat", "cancel", "stop", "ruk", "ruko",
+       "rehne", "rehnede", "rehnedo", "rahne", "rahnedo", "rehan", "rahan", "rehn", "rahin", "rehin",  # "rehne do"
+       "chhod", "chod", "chhodo", "chodo", "chhoddo", "choddo", "chhad", "chhado", "chad", "chado",  # "chhod do"
+       "koni",  # Haryanvi "not"
+       "dont", "don't", "नहीं", "नही", "मत", "रुको", "रुक", "रहने", "रहन", "छोड़", "छोड़ो", "छोड़", "छोड़ो", "कोनी",
+       "ਨਹੀਂ", "ਨਹੀ", "ਨਾ", "ਰਹਿਣ", "ਛੱਡ", "ਛੱਡੋ"}
+_YES_PHRASES = ("go ahead", "do it", "kar do", "kar de", "kar dijiye", "kar dio", "kar diyo", "theek hai",
+                "thik hai", "ha ji", "haa ji", "कर दो", "कर दे", "ठीक है", "हा जी", "ਕਰ ਦਿਓ")
+_NO_PHRASES = ("never mind", "leave it", "forget it", "not now", "no thanks")
+_SOFTENED = {"kar", "karo", "de", "do", "dena", "dijiye", "dio", "diyo", "kardo", "karde"}  # "... na" = please
 
 
 def parse_confirmation(text: str) -> bool | None:
-    """True for a clear yes, False for a clear no, None for anything else (treated as a new request)."""
+    """True for a clear yes, False for a no, None for anything else (treated as a new request).
+
+    A no always wins: "haan... nahi, rehne do" cancels, and so does a short answer with a no in
+    it ("nahi renny do" - a misheard "rehne"). Other words in a longer answer make it a new
+    request instead ("yes and also open chrome").
+    """
     norm = unicodedata.normalize("NFC", text).lower()
     # Drop punctuation/symbols only; \W would also strip Devanagari/Gurmukhi vowel signs.
     norm = "".join(" " if unicodedata.category(c)[0] in "PS" and c != "'" else c for c in norm)
@@ -102,15 +121,20 @@ def parse_confirmation(text: str) -> bool | None:
         return None
     joined = " ".join(words)
     yes = any(w in _YES for w in words) or any(p in joined for p in _YES_PHRASES)
-    no = any(w in _NO for w in words)
-    content = [w for w in words if w not in _FILLER and w not in _YES and w not in _NO]
+    no = any(w in _NO for w in words) or any(p in joined for p in _NO_PHRASES)
+    # "na" / "ना" alone (or "na ji") is a no; after a verb it softens a yes ("kar de na").
+    if ("na" in words or "ना" in words) and not set(words) & _SOFTENED:
+        no = True
+    phrase_words = {w for p in _YES_PHRASES + _NO_PHRASES if p in joined for w in p.split()}
+    content = [w for w in words if w not in _FILLER and w not in _YES and w not in _NO and w not in phrase_words
+               and w != "ना"]
+    if no and len(words) <= 4:
+        return False  # a short answer with a no in it is a no, even with a word the model misheard
     if content:  # other words present: this is a new request, not an answer
         return None
-    if yes and not no:
-        return True
-    if no and not yes:
+    if no:
         return False
-    return None
+    return True if yes else None
 
 
 def _matches(patterns: list[re.Pattern[str]], text: str) -> bool:

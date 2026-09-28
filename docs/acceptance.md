@@ -82,3 +82,49 @@ Resource requirements (same file, `test_R*`):
 | async launch | `launch_game` returns in ~0.1 s; console turn 0.003 s |
 | planner, 78 phrases | system 97.4%, model 96.2%, fast path 37/78 (0 wrong) |
 | discovery | 153 entries in ~1.6 s; shortcuts 146/150; names 42/43 (+1 correct clarification); games 3/3 |
+
+## Subsystem 5 (voice input / speech-to-text) - details in [voice.md](voice.md)
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -m voice   # real faster-whisper models, synthetic speech (no microphone needed)
+.\.venv\Scripts\python.exe -m pytest -m mic     # the real microphone path (PENDING until one is connected)
+```
+
+| Requirement | Tests |
+|---|---|
+| STT provider abstraction (local now, cloud-ready by locality, never used unless enabled + online) | `test_stt.py::test_cloud_stt_is_never_used_unless_enabled_and_online` |
+| mock microphone and mock STT; silence; cancellation; STT errors (timeout, crash, load failure, missing model) | `test_recorder.py`, `test_stt.py`, `test_voice_input.py` |
+| never records forever (no speech, endless speech, endless noise) | `test_recorder.py::test_never_records_forever_*`, `test_silence_times_out_with_no_speech` |
+| resource-aware model choice: memory, game mode (light model only, heavy unloaded), GPU failure -> CPU | `test_stt.py`, live `test_V05_*` |
+| model loaded only when needed, unloaded when idle, process (and its memory) gone after unload | `test_stt.py::test_idle_stt_model_unloads_*`, live `test_V03_*`, `test_V06_*` |
+| microphones: enumeration, automatic choice (communications default first), fallback, disconnect/reconnect, hotplug without restart, no microphone | `test_audio_devices.py`, `test_voice_input.py` |
+| loopback (Stereo Mix), a phone's audio and virtual devices are never chosen automatically | `test_audio_devices.py::test_classification`, `test_default_that_is_virtual_or_loopback_is_not_used` |
+| capture wrapper: WASAPI 16 kHz conversion, format fallbacks, access denied -> privacy message | `test_capture.py` |
+| languages: restriction to en/hi/pa, Devanagari/Gurmukhi romanized, fast path still reached | `test_voice_text.py`, `test_voice_input.py`, `test_voice_conversation.py` |
+| voice goes through the same engine and kernel; confirmations still required; a misheard "yes" never approves; a phone can't answer | `test_voice_conversation.py` |
+| console: push-to-talk, errors shown and NEXUS keeps running | `test_voice_conversation.py::test_console_*`, `test_unexpected_voice_failure_*` |
+| real speech end to end: spoken request -> kernel, no language model loaded | live `test_V04_*` |
+| real microphone: opens and delivers audio; spoken request end to end | `test_voice_mic.py` M01, M02 - **PENDING (no physical microphone connected)** |
+
+| uncertain speech (confidence < 0.6 or a sound-alike guess) asks before any action that changes something | `test_voice_conversation.py` |
+| spoken yes/no in five languages; a no always cancels; an unclear or guessed yes never approves ("haan ji" heard as "anji") | `test_responder.py`, `test_voice_conversation.py` |
+| real-speaker transcripts -> requests; English never rewritten | `test_voice_normalize.py` |
+| bounded decoding; unsure language -> both tried | `test_whisper_worker.py` |
+
+### Results (2026-09-28) - Subsystem 5 READY TO FREEZE
+
+| | |
+|---|---|
+| normal suite | 955 passed, 0 failed (618 before Subsystem 5 + 337 voice) |
+| confirmation tests | 233 passed (`test_responder.py`, `test_voice_conversation.py`, `test_voice_normalize.py`) |
+| Subsystem 4 regression | 268 passed (unchanged) + live L07-L11 in the live suite |
+| live hardware suite | 11 passed |
+| live voice suite | 14 passed (real whisper-small/base) |
+| real microphone | USB microphone (AB13X), chosen automatically (Windows default for calls). `pytest -m mic`: audio 1.98 s in 2 s at 16 kHz. Unplug/re-plug noticed within the 5 s check; "no microphone" reported; listening again without a restart |
+| real speaker, same person, 20 phrases | English 3/3, Hinglish 3/3, Hindi 2/3, Punjabi 2/3, Haryanvi 2/3, yes/no phrases 5/5 (before the fixes: 3/3, 0/3, 2/3, 1/3, 0/3) |
+| spoken yes / no | yes recognised 6/6 (2 approve directly; 4 heard at confidence 0.55-0.57 ask again), no recognised 4/4 (all cancel) |
+| wrong actions | 0. Unclear requests ask first; misses go to the planner, which also asks first when unclear |
+| latency (end of speech -> text) | median 1.34 s, max 1.51 s (before: two outliers of 10.7 s and 23.3 s) |
+| whisper-small | load 2.2 s (while you speak); 390-412 MB RAM loaded, ~550 MB peak; 0 VRAM; unload 0.07 s, process gone; 0 % CPU when idle |
+| idle NEXUS with voice on | 38 MB RAM, 0.13 % of one CPU core, 0 VRAM |
+| planner (78 phrases, after the dialect hint) | system 97.4 %, the same two misses as at the Subsystem 4 freeze |

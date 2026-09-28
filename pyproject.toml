@@ -16,6 +16,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Voice input (subsystem 5): local speech-to-text and microphone capture. ~275 MB installed.
+# Models are downloaded separately: scripts/get_stt_model.py
+voice = ["faster-whisper>=1.1,<2", "sounddevice>=0.4.6"]
 
 [project.scripts]
 nexus = "nexus.__main__:main"
@@ -28,5 +31,9 @@ include = ["nexus*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["live: uses the real GPU and Ollama models (loads/unloads llama3.1:8b); run with: pytest -m live"]
-addopts = "-m \"not live\""
+markers = [
+    "live: uses the real GPU and Ollama models (loads/unloads llama3.1:8b); run with: pytest -m live",
+    "voice: real speech-to-text models on synthetic speech (needs scripts/get_stt_model.py base small); pytest -m voice",
+    "mic: needs a physical microphone connected; pytest -m mic",
+]
+addopts = "-m \"not live and not voice and not mic\""

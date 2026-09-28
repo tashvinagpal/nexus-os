@@ -8,6 +8,7 @@ Action Kernel). Lines starting with "/" are developer commands, including
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Callable
 
@@ -29,6 +30,8 @@ HELP = r"""Talk to NEXUS in English, Hindi, Hinglish or Punjabi - or use a comma
   /unload                        unload all AI models now
   /apps [games|refresh]          installed apps/games NEXUS found (refresh = scan again)
   /aliases, /unalias <name>      your own app names ("Chrome is my browser") and removing one
+  /listen  (or Enter on an empty line)   say something - NEXUS stops at your pause; Ctrl+C cancels
+  /mic [use <name> | auto]       microphones NEXUS can use, and which one it picked
   /memory                        everything NEXUS remembers (with ids)
   /forget <id>                   delete one memory by id (first characters are enough)
   /audit [n]  |  /audit verify   show / check the audit log
@@ -85,10 +88,16 @@ class Console:
         commands = {"help": self._help, "tools": self._tools, "run": self._run, "audit": self._audit,
                     "status": self._status, "gamemode": self._gamemode, "unload": self._unload,
                     "memory": self._memory, "forget": self._forget, "apps": self._apps,
-                    "aliases": self._aliases, "unalias": self._unalias}
+                    "aliases": self._aliases, "unalias": self._unalias, "listen": self._listen,
+                    "l": self._listen, "mic": self._mic}
         apps = getattr(self.rt, "apps", None)
         if apps is not None:
             apps.subscribe(self._on_app_event)  # e.g. "GTA V is running." after a background launch
+        if self._voice is not None:
+            # "Microphone connected: ..." as soon as it is plugged in - no restart needed.
+            self._voice.mics.subscribe(lambda change: self._out(f"  ({change.describe()})"))
+            self._voice.mics.scan()
+            self._voice.mics.start_watching(self._voice.device_poll_s)
         while True:
             try:
                 # Windows PowerShell prefixes piped text with a byte-order mark.
@@ -97,6 +106,8 @@ class Console:
                 self._out("")
                 return
             if not line:
+                if self._voice is not None:
+                    self._listen("")  # push-to-talk: Enter on an empty line
                 continue
             if not line.startswith("/"):
                 self._chat(line)
@@ -113,11 +124,18 @@ class Console:
 
     # --- conversation ------------------------------------------------------------
 
-    def _chat(self, text: str) -> None:
+    @property
+    def _voice(self):
+        return getattr(self.assistant, "voice", None)
+
+    def _chat(self, text: str, *, heard=None) -> None:
         if self.assistant is None:
             self._out("  The AI layer isn't running. Use /run to call tools directly.")
             return
-        self.assistant.engine.handle(UserInput(text, interface="console"), self._show_event)
+        user = (UserInput(text, interface="console") if heard is None
+                else UserInput(heard.text, interface="voice", confidence=heard.confidence,
+                               inferred=getattr(heard, "guessed", False)))
+        self.assistant.engine.handle(user, self._show_event)
         reply = getattr(self.assistant.engine.planner, "last_reply", None)
         if reply is not None and self.assistant.chat.last_choice:
             self._out(f"  ({self.assistant.chat.last_choice}, {reply.seconds:.1f}s)")
@@ -143,6 +161,74 @@ class Console:
         self._show_event(say)
         if self.assistant is not None:
             self.assistant.engine.history.append("default", ChatMessage("assistant", event.message))
+
+    # --- voice ---------------------------------------------------------------------
+
+    def _listen(self, _: str) -> None:
+        """One spoken request, through exactly the same engine as typed text."""
+        from nexus.ai.voice.base import ListeningCancelled, VoiceInputError
+        from nexus.system.audio.errors import AudioInputError
+
+        voice = self._voice
+        if voice is None:
+            note = getattr(self.assistant, "voice_note", "") or "the AI layer is off"
+            self._out(f"  Voice input isn't available: {note}.")
+            return
+
+        def status(message: str) -> None:
+            if message.startswith("listening with"):
+                self._out(f"  ({message} - speak now; Ctrl+C cancels)")
+            elif message != "transcribing":
+                self._out(f"  ({message})")
+
+        try:
+            heard = voice.listen(on_status=status)
+        except ListeningCancelled:
+            self._out("  (cancelled)")
+            return
+        except KeyboardInterrupt:
+            self._out("  (cancelled)")
+            return
+        except (VoiceInputError, AudioInputError) as exc:
+            self._out(f"  (voice) {exc}")
+            return
+        except Exception as exc:  # a driver or audio-library failure must never end the console
+            logging.getLogger(__name__).exception("voice input failed")
+            self._out(f"  (voice) Voice input failed unexpectedly ({type(exc).__name__}: {exc}). "
+                      "Typing still works; details are in var/logs/nexus.log.")
+            return
+        t = voice.last_timings
+        language = heard.transcript.language or "?"
+        romanized = f' -> "{heard.text}"' if heard.text != heard.original else ""
+        confidence = f"{heard.confidence:.2f}" if heard.confidence is not None else "?"
+        self._out(f'  heard: "{heard.original}"{romanized}   ({language}, confidence {confidence}, '
+                  f"transcribed in {t.get('transcribing_s', 0):.1f}s)")
+        guesses = [c for c in getattr(heard, "changes", ()) if "sounds alike" in c]
+        if guesses:
+            self._out(f"  (understood by sound: {'; '.join(guesses)} - NEXUS will ask before acting)")
+        if heard.truncated:
+            self._out("  (you spoke for the maximum length, so the end may be cut off)")
+        self._chat(heard.text, heard=heard)
+
+    def _mic(self, rest: str) -> None:
+        voice = self._voice
+        if voice is None:
+            note = getattr(self.assistant, "voice_note", "") or "the AI layer is off"
+            self._out(f"  Voice input isn't available: {note}.")
+            return
+        cmd, _, arg = rest.partition(" ")
+        if cmd == "use" and arg.strip():
+            ok, message = voice.mics.use(arg.strip())
+            self._out(f"  {message}")
+            return
+        if cmd == "auto":
+            self._out(f"  {voice.mics.use('auto')[1]}")
+            return
+        if cmd not in ("", "rescan"):
+            self._out("  usage: /mic   |   /mic use <part of a name>   |   /mic auto")
+            return
+        for line in voice.mics.describe():
+            self._out(line)
 
     # --- commands ----------------------------------------------------------------
 
@@ -237,6 +323,13 @@ class Console:
             if m["name"] not in a.capabilities.supported_models:
                 tail += ", too big for this device"
             self._out(f"    {m['name']:<24} {state:<11} ~{size}{tail}")
+        voice = getattr(a, "voice", None)
+        if voice is None:
+            self._out(f"  voice input: off ({getattr(a, 'voice_note', '') or 'not configured'})")
+        else:
+            scan = voice.mics.last_scan or voice.mics.scan()
+            mic = scan.chosen.name if scan.chosen else "no microphone connected"
+            self._out(f"  voice input: {mic}   (/listen or Enter to talk, /mic for details)")
 
     def _gamemode(self, rest: str) -> None:
         if self.assistant is None:

@@ -25,6 +25,8 @@ class UserInput:
     interface: str = "console"     # console | voice | ui | mesh
     device: str | None = None      # None = this device; else the paired device it came from
     conversation_id: str = "default"
+    confidence: float | None = None  # voice only: how sure speech recognition was (0-1)
+    inferred: bool = False           # voice only: some words were reconstructed from similar sounds
 
 
 @dataclass(frozen=True)

@@ -31,6 +31,8 @@ log = logging.getLogger(__name__)
 
 Emit = Callable[[TurnEvent], None]
 
+_SAY_AGAIN = "I didn't hear that clearly. Say yes or no again - or type it."
+
 _WAKE = re.compile(r"^\s*(?:(?:hey|hi|ok|okay|oye|oi)\s+)?(?:nexus|नेक्सस|ਨੈਕਸਸ)\b[\s,.:;!-]*", re.IGNORECASE)
 
 
@@ -55,6 +57,18 @@ class _PendingChoice:
 
 # Actions on a named app that the model may only take if the user actually named that app.
 _GROUNDED_TOOLS = {"launch_app": "open", "close_app": "close", "force_close_app": "force-close"}
+
+# Tools that only read information. Everything else changes something (opens, starts, closes,
+# writes), so a request that wasn't heard clearly asks before doing it.
+_READ_ONLY_TOOLS = {"get_datetime", "get_system_info", "list_memories", "list_apps"}
+
+
+@dataclass(frozen=True)
+class _PendingVoiceCheck:
+    steps: tuple[ActionStep, ...]
+    language: str
+    text: str
+    from_model: bool
 
 _ORDINALS = {"first": 0, "1": 0, "1st": 0, "one": 0, "pehla": 0, "pehli": 0, "pehle": 0, "pahla": 0,
              "second": 1, "2": 1, "2nd": 1, "two": 1, "dusra": 1, "doosra": 1, "dusri": 1, "dusre": 1,
@@ -87,7 +101,7 @@ class ConversationEngine:
     def __init__(self, kernel: ActionKernel, planner: Planner, *, composer: ResponseComposer | None = None,
                  history: HistoryStore | None = None, resources: ResourceManager | None = None,
                  memory: MemoryStore | None = None, router: FastPathRouter | None = None,
-                 max_actions: int = 3) -> None:
+                 max_actions: int = 3, voice_confirm_min_confidence: float = 0.6) -> None:
         self.kernel = kernel
         self.planner = planner
         self.router = router
@@ -96,9 +110,12 @@ class ConversationEngine:
         self.resources = resources
         self.memory = memory
         self.max_actions = max_actions
+        # A spoken "yes" approves an action only if speech recognition was at least this sure.
+        self.voice_confirm_min_confidence = voice_confirm_min_confidence
         # Keyed by (conversation, device): only the device that was asked can answer by voice/text.
         self._pending: dict[tuple[str, str | None], _PendingConfirmation] = {}
         self._choices: dict[tuple[str, str | None], _PendingChoice] = {}
+        self._voice_checks: dict[tuple[str, str | None], _PendingVoiceCheck] = {}
 
     def handle(self, user: UserInput, emit: Emit) -> None:
         text = strip_wake_word(user.text)
@@ -111,6 +128,12 @@ class ConversationEngine:
         pending = self._pending.pop((user.conversation_id, user.device), None)
         if pending is not None:
             answer = parse_confirmation(text)
+            if answer is True and self._unclear_voice(user):
+                # Misheard speech must never approve an action: keep the question open and ask again.
+                self._pending[(user.conversation_id, user.device)] = pending
+                out(Say(SayKind.CONFIRM, _SAY_AGAIN, pending.language))
+                self._record(user, text, events)
+                return
             self._answer(pending, answer is True, user, out)
             if answer is not None:
                 self._record(user, text, events)
@@ -118,6 +141,11 @@ class ConversationEngine:
             # Not a yes/no: the pending action was cancelled above; treat this as a new request.
         choice = self._choices.pop((user.conversation_id, user.device), None)
         if choice is not None:
+            if parse_confirmation(text) is True and self._unclear_voice(user):
+                self._choices[(user.conversation_id, user.device)] = choice
+                out(Say(SayKind.CONFIRM, _SAY_AGAIN, choice.language))
+                self._record(user, text, events)
+                return
             picked = pick_option(text, choice.options)
             if picked is not None:
                 self._run(ActionStep(choice.step.tool, {**choice.step.args, choice.param: picked}),
@@ -129,6 +157,20 @@ class ConversationEngine:
                 self._record(user, text, events)
                 return
             # Anything else: a new request.
+        check = self._voice_checks.pop((user.conversation_id, user.device), None)
+        if check is not None:
+            answer = parse_confirmation(text)
+            if answer is True and self._unclear_voice(user):
+                self._voice_checks[(user.conversation_id, user.device)] = check
+                out(Say(SayKind.CONFIRM, _SAY_AGAIN, check.language))
+            elif answer is True:
+                self._act(list(check.steps), user, check.language, out, text=check.text, from_model=check.from_model)
+            elif answer is False:
+                out(Say(SayKind.RESULT, "Okay, I won't do that.", check.language))
+            if answer is not None:
+                self._record(user, text, events)
+                return
+            # Anything else: a new request (the unconfirmed one is dropped).
         if text:
             self._converse(text, user, out)
         self._record(user, text, events)
@@ -146,6 +188,37 @@ class ConversationEngine:
         self._report(outcome, "?", user, "en", emit)
 
     # --- internals ---------------------------------------------------------------
+
+    def _unclear_voice(self, user: UserInput) -> bool:
+        """Speech that wasn't heard clearly enough to act on (or to approve anything) without asking."""
+        return (user.interface == "voice"
+                and (user.confidence is None or user.confidence < self.voice_confirm_min_confidence
+                     or user.inferred))
+
+    def _describe(self, step: ActionStep) -> str:
+        name = step.args.get("name")
+        if step.tool in _GROUNDED_TOOLS and isinstance(name, str):
+            if self.router is not None and self.router.apps is not None:
+                res = self.router.apps.resolve(name)
+                name = res.match.display_name if res.match is not None else name
+            return f"{_GROUNDED_TOOLS[step.tool]} {name}"
+        described = {"open_folder": "open {target}", "open_url": "open {url}",
+                     "search_web": "search the web for {query}", "remember": 'remember "{text}"',
+                     "create_folder": "create the folder {path}", "forget_memory": "forget that memory",
+                     "set_app_alias": 'call {app} your "{alias}"',
+                     "remove_app_alias": 'remove your "{alias}" name'}.get(step.tool)
+        try:
+            return described.format(**step.args) if described else f"run {step.tool}"
+        except (KeyError, IndexError):
+            return f"run {step.tool}"
+
+    def _act(self, steps: list[ActionStep], user: UserInput, language: str, out: Emit, *, text: str,
+             from_model: bool) -> None:
+        for index, step in enumerate(steps):
+            if self._run(step, user, language, out, text=text if from_model else ""):
+                if index < len(steps) - 1:
+                    out(Say(SayKind.REPLY, "I'll wait for your answer before doing anything else.", language))
+                break
 
     def _converse(self, text: str, user: UserInput, out: Emit) -> None:
         history = self.history.recent(user.conversation_id)
@@ -175,16 +248,20 @@ class ConversationEngine:
                 out(Say(SayKind.REPLY, say, plan.language))
             return
 
+        steps = plan.actions[:self.max_actions]
+        from_model = plan.acknowledge  # fast-path plans come from fixed rules, not the model
+        if self._unclear_voice(user) and any(s.tool not in _READ_ONLY_TOOLS for s in steps):
+            # Not heard clearly (or reconstructed from similar sounds): ask before changing anything.
+            self._voice_checks[(user.conversation_id, user.device)] = _PendingVoiceCheck(
+                tuple(steps), plan.language, text, from_model)
+            what = " and ".join(self._describe(s) for s in steps)
+            out(Say(SayKind.CONFIRM, f'I\'m not sure I heard you right ("{text}"). Should I {what}? (yes/no)',
+                    plan.language))
+            return
         # With actions, the model's own words are not spoken: they could claim a result.
         if plan.acknowledge:
             out(Say(SayKind.REPLY, self.composer.acknowledge(plan.language, text), plan.language))
-        steps = plan.actions[:self.max_actions]
-        from_model = plan.acknowledge  # fast-path plans come from fixed rules, not the model
-        for index, step in enumerate(steps):
-            if self._run(step, user, plan.language, out, text=text if from_model else ""):
-                if index < len(steps) - 1:
-                    out(Say(SayKind.REPLY, "I'll wait for your answer before doing anything else.", plan.language))
-                break
+        self._act(steps, user, plan.language, out, text=text, from_model=from_model)
 
     def _ungrounded_launch(self, step: ActionStep, text: str) -> str | None:
         """A launch_app the model proposed for an app the user never mentioned: its display name, else None.

@@ -275,6 +275,14 @@ class ResourceManager:
                     if slot.in_use == 0 and now - slot.last_used >= slot.backend.spec.idle_unload_s
                     and self._unload(slot)]
 
+    def unload(self, name: str) -> bool:
+        """Unload one model now, unless it is in use. True if it was loaded and is now unloaded."""
+        slot = self._slots.get(name)
+        if slot is None:
+            return False
+        with self._lock:
+            return slot.in_use == 0 and self._unload(slot)
+
     def unload_all(self) -> list[str]:
         with self._lock:
             return [name for name, slot in self._slots.items() if slot.in_use == 0 and self._unload(slot)]

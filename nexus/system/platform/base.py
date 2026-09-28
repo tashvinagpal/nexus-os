@@ -27,6 +27,25 @@ class LaunchError(OSError):
     """The OS refused to start it (missing file, needs administrator rights, ...)."""
 
 
+@dataclass(frozen=True)
+class AudioInput:
+    """An audio capture endpoint as the OS reports it - facts only, read-only.
+
+    NEXUS decides what is a usable microphone in nexus/system/audio; the
+    platform only translates its own terms into these fields.
+    """
+
+    id: str                        # stable OS endpoint id
+    name: str                      # "Microphone (Realtek(R) Audio)"
+    state: str = "active"          # active | disabled | unplugged
+    form_factor: str = "unknown"   # microphone | headset | handset | line_in | unknown | other
+    bus: str = "other"             # builtin | usb | bluetooth | virtual | other
+    loopback: bool = False         # records what the PC plays ("Stereo Mix"), not a microphone
+    remote: bool = False           # audio from another device (a phone's call/music over Bluetooth)
+    default: bool = False          # the OS default input
+    default_communications: bool = False  # the OS default input for calls/voice
+
+
 class Platform(Protocol):
     name: str
 
@@ -89,4 +108,16 @@ class Platform(Protocol):
 
     def requires_elevation(self, exe: Path) -> bool | None:
         """True if the program demands administrator rights; None if unknown."""
+        ...
+
+    def audio_inputs(self) -> list[AudioInput]:
+        """Every audio capture endpoint that is active, disabled or unplugged (not removed ones).
+
+        Called again whenever NEXUS needs a fresh view, so devices plugged in
+        after start-up appear without a restart. Never opens a device.
+        """
+        ...
+
+    def microphone_allowed(self) -> bool | None:
+        """False if the OS privacy settings block microphone access for this app; None if unknown."""
         ...

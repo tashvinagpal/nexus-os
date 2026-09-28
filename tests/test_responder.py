@@ -14,19 +14,50 @@ def test_yes(text):
 
 @pytest.mark.parametrize("text", [
     "no", "nahi", "nahi yaar", "mat kar", "cancel", "stop", "rehne de", "नहीं", "मत करो", "ਨਹੀਂ", "no don't",
+    # a no always wins, and a lone "na" is a no (subsystem 5 real-speaker test)
+    "haan mat kar", "na", "ना",
 ])
 def test_no(text):
     assert parse_confirmation(text) is False
 
 
+# From the real-speaker test (subsystem 5): every one of these must cancel.
 @pytest.mark.parametrize("text", [
-    "haan mat kar",               # contradictory
+    "no", "nope", "nahin", "nahi", "नहीं", "रहने दो", "rehne do", "rahne do", "nahi chahiye", "छोड़ दो", "chhod do",
+    "nahi, rehne do", "nahin, rahne do", "नहीं रहने दो", "nahin rahne do", "na ji", "ना", "koni", "ਨਹੀਂ ਜੀ",
+    "never mind", "leave it", "haan... nahi nahi, rehne do", "nahi renny do",
+])
+def test_spoken_no_forms(text):
+    assert parse_confirmation(text) is False
+
+
+@pytest.mark.parametrize("text", [
+    "haan, kar do", "Haan kar do", "haan ji", "ਹਾਂ ਜੀ", "हाँ, कर दे", "kar dio", "ठीक सै", "a, kar do", "अ, कर दो",
+    "yes, go ahead", "bilkul",
+])
+def test_spoken_yes_forms(text):
+    assert parse_confirmation(text) is True
+
+
+# Real-microphone retest (subsystem 5): "haan ji" was transcribed as "अंजी" -> "anji".
+@pytest.mark.parametrize("text, answer", [
+    ("haan ji", True), ("haanji", True), ("anji", True), ("अंजी", True), ("आंजी", True), ("Haan ji", True),
+    ("ha ji", True), ("haan, kar do", True), ("haan, kar de", True), ("yes", True),
+    ("aa kar do", True),                                   # real: "आ, कर दो." romanized
+    ("nahi", False), ("nahin rahne do", False), ("nahi chahiye", False),
+    ("नहीं रहेने दो", False), ("नहीं चाही एग", False),       # real transcripts of "nahi, rehne do" / "nahi chahiye"
+    ("anjali", None), ("anji bhai kya haal hai", None),    # a name, and a new request - not a yes
+])
+def test_confirmation_regressions_from_the_real_retest(text, answer):
+    assert parse_confirmation(text) is answer
+
+
+@pytest.mark.parametrize("text", [
     "yes and also open chrome",   # a new request, not just an answer
     "what will it delete?",
     "",
     "ha ha",                      # laughing is not consent
     "hmm",
-    "na",
 ])
 def test_not_a_clear_answer(text):
     assert parse_confirmation(text) is None

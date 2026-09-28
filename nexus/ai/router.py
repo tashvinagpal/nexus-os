@@ -40,6 +40,7 @@ _TIME = re.compile(
     r"\bwhat(?:'s| is)?\s+(?:the\s+)?time\b|\btime\s+(?:is it|now|please)\b|\bcurrent time\b|"
     r"\bwhat(?:'s| is)?\s+(?:the\s+|today'?s\s+)?date\b|\bwhat day is (?:it|today)\b|\btoday'?s date\b|"
     r"\btime\s+kya\s+(?:hua|hai|ho\s*gaya)\b|\bkitne\s+baje\b|\babhi\s+(?:ka\s+)?time\b|"
+    r"\bkya\s+time\s+(?:hai|hua|ho\s*(?:raha|rha|gaya|gya))\b|"
     r"\baaj\s+(?:ki\s+|kaun\s*si\s+|kya\s+)?(?:date|tareekh|tarikh)\b|\baaj\s+kaun\s*sa\s+din\b|"
     r"\bkinne\s+vaje\b|कितने\s+बजे|समय\s+क्या|आज\s+(?:की\s+)?तारीख|ਕਿੰਨੇ\s+ਵਜੇ", re.IGNORECASE)
 

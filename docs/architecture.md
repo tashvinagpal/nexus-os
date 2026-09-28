@@ -49,7 +49,7 @@ SteamOS/ChromeOS/Android. Writing a new kernel is not a goal.
 ## Layers inside one NEXUS device
 
 ```
- front ends     console | voice (later) | HUD (later) | mesh gateway (other devices)
+ front ends     console (text + push-to-talk voice) | HUD (later) | mesh gateway (other devices)
                     \          |            |            /
  conversation   ConversationEngine: fast path OR plan -> ack -> preview -> kernel -> verified result
                     |                              (docs/conversation.md)
@@ -126,11 +126,18 @@ device's capabilities (type, CPU, RAM, GPU, VRAM, supported models).
   GPU models until it ends; the AI falls back to a CPU-only model.
 - A model stays loaded permanently only if you set `keep_llm_loaded = true`
   (off by default); game mode still unloads it.
+- Voice input (subsystem 5, [voice.md](voice.md)): the speech model loads when
+  listening starts (LISTENING), in a worker process that is ended when the model
+  unloads (60 s idle), so all of its memory really comes back. Game mode uses
+  only the light model (base, 2 CPU threads). The model never uses the GPU
+  unless configured.
 - Voice output (`nexus/ai/voice/speaker.py`) loads its model only while
-  SPEAKING and yields to games (text-only). Planned voice pipeline: wake word
-  (tiny, CPU) -> STT on demand -> fast path/planner -> kernel -> TTS on demand
-  -> unload on idle.
-- Idle cost measured: NEXUS process 33-40 MB RAM, 0 VRAM.
+  SPEAKING and yields to games (text-only). Pipeline: (wake word, later) ->
+  STT on demand -> fast path/planner -> kernel -> TTS on demand -> unload on idle.
+- Idle cost measured: NEXUS process 33-40 MB RAM, 0 VRAM (38 MB with voice
+  input on and the microphone check running).
+- Voice input: whisper-small 391 MB RAM loaded (551 MB transcribing), ~1.2 s per
+  phrase on the CPU; whisper-base 192/305 MB, ~0.6 s. Loaded and idle: 0 % CPU.
 
 Provider choice per request (`nexus/ai/providers/selection.py`): best-first
 list from `config/nexus.toml`; skip cloud unless enabled, skip LAN/cloud
@@ -166,13 +173,13 @@ nexus-os/
     core/            kernel, resources, config, runtime + assistant wiring
     tools/           structured tools
     security/        permissions (policy), audit, identity (device keys)
-    system/          platform/ (Windows now), info, device capabilities
+    system/          platform/ (Windows now), info, device capabilities, audio/ (microphones)
     ai/
       providers/     ChatProvider interface, Ollama, HybridChat + selection
       planner/       language -> Plan (LLM, JSON-schema constrained)
       conversation/  turn types, engine, responder (honesty), history
       memory/        MemoryStore interface (SQLite impl = subsystem 3)
-      voice/         STTProvider / TTSProvider interfaces (impls = subsystems 5-7)
+      voice/         speech-to-text (faster-whisper worker, recorder, listener), TTS interface
       vision/        VisionProvider interface (v0.5)
     mesh/            envelopes, device registry, gateway, transports
     console.py       text front end
@@ -192,8 +199,8 @@ nexus-os/
 | 2b | Acceptance criteria as tests; fast path; capabilities; per-device permissions | done |
 | 3 | Memory (SQLite, local-first scopes) - [memory.md](memory.md) | done |
 | 4 | App & game discovery, verified launch/close, async game launch, aliases - [apps.md](apps.md) | done, FROZEN |
-| 5 | TTS behind `TTSProvider` | |
-| 6 | STT (push-to-talk) behind `STTProvider` | |
+| 5 | Voice input: STT (push-to-talk) behind `STTProvider`, automatic microphones - [voice.md](voice.md) | done, real microphone + real speaker tested; ready to freeze |
+| 6 | TTS behind `TTSProvider` | |
 | 7 | Wake word | |
 | 8 | HUD (Qt/QML): orb, transcript, confirmation buttons | |
 

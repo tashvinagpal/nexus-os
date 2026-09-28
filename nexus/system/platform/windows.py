@@ -11,7 +11,7 @@ from ctypes import wintypes
 from pathlib import Path
 from typing import Iterable
 
-from nexus.system.platform.base import LaunchError, LaunchMethod, LaunchSpec
+from nexus.system.platform.base import AudioInput, LaunchError, LaunchMethod, LaunchSpec
 
 # Windows known-folder ids (correct even when Desktop/Documents are redirected to OneDrive).
 _KNOWN_FOLDERS = {
@@ -63,8 +63,180 @@ def _user32():
     return u
 
 
+# --- audio inputs: Core Audio (MMDevice) API, read-only - no device is ever opened here ---
+
+_CLSID_MM_DEVICE_ENUMERATOR = "BCDE0395-E52F-467C-8E3D-C4579291692E"
+_IID_IMM_DEVICE_ENUMERATOR = "A95664D2-9614-4F35-A746-DE8DB63617E6"
+_E_CAPTURE = 1
+_ROLE_CONSOLE, _ROLE_COMMUNICATIONS = 0, 2
+_DEVICE_STATES = {0x1: "active", 0x2: "disabled", 0x8: "unplugged"}  # NOT_PRESENT (removed) is skipped
+_RPC_E_CHANGED_MODE = -2147417850  # COM already initialised differently on this thread: just use it
+_FORM_FACTORS = {4: "microphone", 5: "headset", 6: "handset", 2: "line_in", 10: "unknown"}
+_PK_FRIENDLY_NAME = ("A45C254E-DF1C-4EFD-8020-67D146A850E0", 14)
+_PK_ENUMERATOR = ("A45C254E-DF1C-4EFD-8020-67D146A850E0", 24)   # USB, HDAUDIO, BTHENUM, ROOT...
+_PK_FORM_FACTOR = ("1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E", 0)
+_PK_DEVICE_PATH = ("B3F8FA53-0004-438E-9003-51A46E139BFC", 2)   # "{1}.BTHENUM\{0000110A-...}..."
+_A2DP_SOURCE = "{0000110A-"  # Bluetooth "audio source" service: a phone streaming its sound to this PC
+
+
+class _PROPERTYKEY(ctypes.Structure):
+    _fields_ = [("fmtid", _GUID), ("pid", wintypes.DWORD)]
+
+
+class _PROPVARIANT(ctypes.Structure):
+    _fields_ = [("vt", ctypes.c_ushort), ("reserved", ctypes.c_ushort * 3), ("value", ctypes.c_void_p),
+                ("extra", ctypes.c_void_p)]
+
+
+def _com(obj: ctypes.c_void_p, index: int, *argtypes):
+    """Method `index` of a COM object's vtable; a failed HRESULT raises OSError."""
+    vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    fn = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p, *argtypes)(vtable[index])
+    return lambda *args: fn(obj, *args)
+
+
+def _com_release(obj: ctypes.c_void_p) -> None:
+    if obj:
+        vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])(obj)
+
+
+def _ole32():
+    ole = ctypes.WinDLL("ole32")
+    ole.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    ole.CoInitializeEx.restype = ctypes.c_long
+    ole.CoCreateInstance.argtypes = [ctypes.POINTER(_GUID), ctypes.c_void_p, wintypes.DWORD,
+                                     ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p)]
+    ole.CoCreateInstance.restype = ctypes.HRESULT
+    ole.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole.PropVariantClear.argtypes = [ctypes.POINTER(_PROPVARIANT)]
+    return ole
+
+
+def _audio_bus(enumerator: str) -> str:
+    enumerator = enumerator.upper()
+    if enumerator in ("HDAUDIO", "INTELAUDIO", "ACPI", "PCI"):
+        return "builtin"
+    if enumerator == "USB":
+        return "usb"
+    if enumerator.startswith("BTH"):
+        return "bluetooth"
+    if enumerator == "ROOT":  # root-enumerated = a software driver (virtual cameras, virtual cables...)
+        return "virtual"
+    return "other"
+
+
+_MIC_CONSENT = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+
+
 class WindowsPlatform:
     name = "windows"
+
+    def microphone_allowed(self) -> bool | None:
+        """Windows privacy switches: device-wide, this user, and "let desktop apps access your microphone"."""
+        values = [self.read_registry(f"HKLM\\{_MIC_CONSENT}", "Value"),
+                  self.read_registry(f"HKCU\\{_MIC_CONSENT}", "Value"),
+                  self.read_registry(f"HKCU\\{_MIC_CONSENT}\\NonPackaged", "Value")]
+        if any(v == "Deny" for v in values):
+            return False
+        return True if any(v == "Allow" for v in values) else None
+
+    def audio_inputs(self) -> list[AudioInput]:
+        ole = _ole32()
+        hr = ole.CoInitializeEx(None, 0x0)  # COINIT_MULTITHREADED
+        if hr < 0 and hr != _RPC_E_CHANGED_MODE:
+            raise OSError(f"COM initialisation failed (0x{hr & 0xFFFFFFFF:08X})")
+        enumerator = ctypes.c_void_p()
+        try:
+            ole.CoCreateInstance(ctypes.byref(_guid(_CLSID_MM_DEVICE_ENUMERATOR)), None, 0x17,  # CLSCTX_ALL
+                                 ctypes.byref(_guid(_IID_IMM_DEVICE_ENUMERATOR)), ctypes.byref(enumerator))
+            default = self._default_input(enumerator, _ROLE_CONSOLE, ole)
+            communications = self._default_input(enumerator, _ROLE_COMMUNICATIONS, ole)
+            collection = ctypes.c_void_p()
+            _com(enumerator, 3, ctypes.c_int, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p))(
+                _E_CAPTURE, 0x1 | 0x2 | 0x8, ctypes.byref(collection))  # active | disabled | unplugged
+            inputs: list[AudioInput] = []
+            try:
+                count = wintypes.UINT()
+                _com(collection, 3, ctypes.POINTER(wintypes.UINT))(ctypes.byref(count))
+                for i in range(count.value):
+                    device = ctypes.c_void_p()
+                    try:
+                        _com(collection, 4, wintypes.UINT, ctypes.POINTER(ctypes.c_void_p))(i, ctypes.byref(device))
+                        inputs.append(self._audio_input(device, default, communications, ole))
+                    except OSError:
+                        continue  # unplugged while we were looking
+                    finally:
+                        _com_release(device)
+            finally:
+                _com_release(collection)
+            return inputs
+        finally:
+            _com_release(enumerator)
+            if hr >= 0:
+                ole.CoUninitialize()
+
+    @staticmethod
+    def _device_id(device: ctypes.c_void_p, ole) -> str:
+        raw = ctypes.c_void_p()
+        _com(device, 5, ctypes.POINTER(ctypes.c_void_p))(ctypes.byref(raw))  # IMMDevice::GetId
+        try:
+            return ctypes.wstring_at(raw.value) if raw.value else ""
+        finally:
+            ole.CoTaskMemFree(raw)
+
+    def _default_input(self, enumerator: ctypes.c_void_p, role: int, ole) -> str | None:
+        device = ctypes.c_void_p()
+        try:
+            _com(enumerator, 4, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))(
+                _E_CAPTURE, role, ctypes.byref(device))
+            return self._device_id(device, ole)
+        except OSError:  # E_NOTFOUND: no active input at all
+            return None
+        finally:
+            _com_release(device)
+
+    def _audio_input(self, device: ctypes.c_void_p, default: str | None, communications: str | None,
+                     ole) -> AudioInput:
+        endpoint_id = self._device_id(device, ole)
+        state = wintypes.DWORD()
+        _com(device, 6, ctypes.POINTER(wintypes.DWORD))(ctypes.byref(state))  # IMMDevice::GetState
+        store = ctypes.c_void_p()
+        _com(device, 4, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p))(0, ctypes.byref(store))  # STGM_READ
+        try:
+            def prop(key: tuple[str, int]) -> str | int | None:
+                pk = _PROPERTYKEY(_guid(key[0]), key[1])
+                pv = _PROPVARIANT()
+                try:
+                    _com(store, 5, ctypes.POINTER(_PROPERTYKEY), ctypes.POINTER(_PROPVARIANT))(
+                        ctypes.byref(pk), ctypes.byref(pv))  # IPropertyStore::GetValue
+                except OSError:
+                    return None
+                try:
+                    if pv.vt == 31:  # VT_LPWSTR
+                        return ctypes.wstring_at(pv.value) if pv.value else ""
+                    if pv.vt == 19:  # VT_UI4
+                        return (pv.value or 0) & 0xFFFFFFFF
+                    return None
+                finally:
+                    ole.PropVariantClear(ctypes.byref(pv))
+
+            name = str(prop(_PK_FRIENDLY_NAME) or "Unknown input")
+            enumerator = str(prop(_PK_ENUMERATOR) or "")
+            path = str(prop(_PK_DEVICE_PATH) or "").upper()
+            form = prop(_PK_FORM_FACTOR)
+        finally:
+            _com_release(store)
+        form_factor = _FORM_FACTORS.get(form if isinstance(form, int) else -1, "other")
+        bus = _audio_bus(enumerator)
+        # A codec input with no microphone/line form factor is a mix of what the PC plays ("Stereo Mix").
+        loopback = bus == "builtin" and form_factor == "unknown"
+        # This PC as the speaker of a phone: the phone's call (hands-free "HF Audio") or its music (A2DP).
+        remote = bus == "bluetooth" and (_A2DP_SOURCE in path or (
+            enumerator.upper() == "BTHHFENUM" and form_factor not in ("headset", "handset")))
+        return AudioInput(id=endpoint_id, name=name, state=_DEVICE_STATES.get(state.value & 0xF, "unknown"),
+                          form_factor=form_factor, bus=bus, loopback=loopback, remote=remote,
+                          default=endpoint_id == default, default_communications=endpoint_id == communications)
 
     def protected_paths(self) -> list[Path]:
         env = os.environ
