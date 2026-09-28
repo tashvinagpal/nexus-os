@@ -210,7 +210,8 @@ utterance length and timings, stops, errors - never the text of the conversation
   behind the same provider interface.
 - No SSML; no streaming inside a sentence; one reply at a time (queued).
 - No echo cancellation: push-to-talk stops speech before listening, so NEXUS doesn't
-  hear itself; an always-on wake word (subsystem 7) will need more than that.
+  hear itself; the wake word (subsystem 7) doesn't listen while NEXUS speaks unless
+  `barge_in` is on ([wake.md](wake.md)).
 - If the default output changes mid-sentence, that sentence ends; the next one uses
   the new device.
 - The int8 model (88 MB) was downloaded for the comparison and is not used by default;

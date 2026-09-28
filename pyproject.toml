@@ -22,6 +22,9 @@ voice = ["faster-whisper>=1.1,<2", "sounddevice>=0.4.6"]
 # Voice output (subsystem 6): Kokoro text-to-speech (uses the onnxruntime/numpy from [voice]).
 # ~10 MB of packages; the model is downloaded separately: scripts/get_tts_model.py fp32
 tts = ["kokoro-onnx>=0.4,<1", "sounddevice>=0.4.6"]
+# Wake word (subsystem 7) needs nothing new at run time (onnxruntime + numpy come with [voice]).
+# Training the "Nexus" model (scripts/train_wake_model.py) also needs [tts] for Kokoro, and onnx to save it.
+wake-train = ["onnx>=1.15"]
 
 [project.scripts]
 nexus = "nexus.__main__:main"
@@ -40,5 +43,6 @@ markers = [
     "mic: needs a physical microphone connected; pytest -m mic",
     "tts: the real text-to-speech model, no sound played (needs scripts/get_tts_model.py fp32); pytest -m tts",
     "speaker: plays through the real audio output (you will hear it); pytest -m speaker",
+    "wake: real wake-word models (scripts/get_wake_model.py; Kokoro for speech; train_wake_model.py for Nexus); pytest -m wake",
 ]
-addopts = "-m \"not live and not voice and not mic and not tts and not speaker\""
+addopts = "-m \"not live and not voice and not mic and not tts and not speaker and not wake\""

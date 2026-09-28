@@ -214,7 +214,7 @@ class WhisperSTT:
     # --- STTProvider ---------------------------------------------------------------------
 
     def transcribe(self, audio: AudioClip, *, language_hint: str | None = None,
-                   cancel: threading.Event | None = None) -> Transcript:
+                   cancel: threading.Event | None = None, prompt: str | None = None) -> Transcript:
         if not audio.pcm16:
             raise STTFailed("There was no audio to transcribe.")
         with self._lock:
@@ -223,6 +223,8 @@ class WhisperSTT:
                 raise STTFailed("The speech engine isn't running.")
             request = {"op": "transcribe", "bytes": len(audio.pcm16), "rate": audio.sample_rate,
                        "language": language_hint, "languages": list(self.languages), "beam_size": self.beam_size}
+            if prompt:
+                request["prompt"] = prompt  # e.g. the wake word, so the model spells it the usual way
             try:
                 proc.stdin.write(json.dumps(request).encode() + b"\n" + audio.pcm16)
                 proc.stdin.flush()

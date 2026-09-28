@@ -133,8 +133,12 @@ device's capabilities (type, CPU, RAM, GPU, VRAM, supported models).
   unless configured.
 - Voice output (subsystem 6, [tts.md](tts.md)): Kokoro on the CPU in a worker
   process, loaded while NEXUS thinks, SPEAKING while it talks, unloaded after 120 s
-  idle; quiet (text only, model freed) in game mode; 0 VRAM. Pipeline: (wake word,
-  later) -> STT on demand -> fast path/planner -> kernel -> TTS on demand -> unload on idle.
+  idle; quiet (text only, model freed) in game mode; 0 VRAM. Pipeline: wake word ->
+  STT on demand -> fast path/planner -> kernel -> TTS on demand -> unload on idle.
+- Wake word (subsystem 7, [wake.md](wake.md)): openWakeWord networks on the CPU,
+  ~60 MB RAM and ~2% of one core while listening (held loaded while the listener
+  runs, kind "wakeword"); or the Whisper detector, which loads a light speech model
+  only when speech is heard. Neither touches the GPU, so both keep running in game mode.
 - Idle cost measured: NEXUS process 33-40 MB RAM, 0 VRAM (38 MB with voice
   input on and the microphone check running).
 - Voice input: whisper-small 391 MB RAM loaded (551 MB transcribing), ~1.2 s per
@@ -203,8 +207,8 @@ nexus-os/
 | 3 | Memory (SQLite, local-first scopes) - [memory.md](memory.md) | done |
 | 4 | App & game discovery, verified launch/close, async game launch, aliases - [apps.md](apps.md) | done, FROZEN |
 | 5 | Voice input: STT (push-to-talk) behind `STTProvider`, automatic microphones - [voice.md](voice.md) | done, real microphone + real speaker tested, FROZEN |
-| 6 | Voice output: TTS (Kokoro, local) behind `TTSProvider`, default output device - [tts.md](tts.md) | done, real output tested; awaiting review |
-| 7 | Wake word | |
+| 6 | Voice output: TTS (Kokoro, local) behind `TTSProvider`, default output device - [tts.md](tts.md) | done, real output tested, FROZEN |
+| 7 | Wake word "Nexus": always-on listener, `WakeDetector` (Whisper now, trained openWakeWord model), follow-up answers - [wake.md](wake.md) | done in simulation + synthetic speech; awaiting real-microphone test |
 | 8 | HUD (Qt/QML): orb, transcript, confirmation buttons | |
 
 Later: LAN transport + pairing (mesh), phone client, automatic game-mode

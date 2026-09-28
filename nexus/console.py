@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+from contextlib import nullcontext
 from typing import Callable
 
 from nexus import __version__
@@ -32,6 +34,7 @@ HELP = r"""Talk to NEXUS in English, Hindi, Hinglish or Punjabi - or use a comma
   /aliases, /unalias <name>      your own app names ("Chrome is my browser") and removing one
   /listen  (or Enter on an empty line)   say something - NEXUS stops at your pause; Ctrl+C cancels
   /mic [use <name> | auto]       microphones NEXUS can use, and which one it picked
+  /wake [on | off | test]        wake word: say "Nexus ..." instead of pressing Enter; test = show detections
   /tts [on | off | test]         voice output: status, turn it on/off, say a test sentence
   /stop                          stop speaking now (typing or talking also interrupts NEXUS)
   /memory                        everything NEXUS remembers (with ids)
@@ -81,6 +84,8 @@ class Console:
         self.speaker = getattr(assistant, "speaker", None) or Speaker(tts or SilentTTS())
         self._input = input_fn
         self._out = output
+        # One turn at a time: typed text, push-to-talk and the wake word can arrive together.
+        self._turn = threading.Lock()
 
     def run(self) -> None:
         self._out(f"NEXUS {__version__}")
@@ -91,7 +96,7 @@ class Console:
                     "status": self._status, "gamemode": self._gamemode, "unload": self._unload,
                     "memory": self._memory, "forget": self._forget, "apps": self._apps,
                     "aliases": self._aliases, "unalias": self._unalias, "listen": self._listen,
-                    "l": self._listen, "mic": self._mic, "tts": self._tts, "stop": self._stop_speaking}
+                    "l": self._listen, "mic": self._mic, "tts": self._tts, "stop": self._stop_speaking, "wake": self._wake_cmd}
         apps = getattr(self.rt, "apps", None)
         if apps is not None:
             apps.subscribe(self._on_app_event)  # e.g. "GTA V is running." after a background launch
@@ -100,6 +105,11 @@ class Console:
             self._voice.mics.subscribe(lambda change: self._out(f"  ({change.describe()})"))
             self._voice.mics.scan()
             self._voice.mics.start_watching(self._voice.device_poll_s)
+        wake = self._wake
+        if wake is not None:
+            wake.on_heard = self._wake_heard
+            wake.on_event = self._wake_event
+            wake.start()
         while True:
             try:
                 # Windows PowerShell prefixes piped text with a byte-order mark.
@@ -131,21 +141,34 @@ class Console:
     def _voice(self):
         return getattr(self.assistant, "voice", None)
 
-    def _chat(self, text: str, *, heard=None) -> None:
+    @property
+    def _wake(self):
+        return getattr(self.assistant, "wake", None)
+
+    def _chat(self, text: str, *, heard=None) -> list[TurnEvent]:
+        """One turn through the conversation engine; returns what NEXUS said and did."""
         if self.assistant is None:
             self._out("  The AI layer isn't running. Use /run to call tools directly.")
-            return
+            return []
         user = (UserInput(text, interface="console") if heard is None
                 else UserInput(heard.text, interface="voice", confidence=heard.confidence,
                                inferred=getattr(heard, "guessed", False)))
-        prepare = getattr(self.speaker, "prepare", None)
-        if prepare is not None:
-            prepare()  # load the voice while NEXUS thinks, so the answer is heard sooner
-        self.assistant.engine.handle(user, self._show_event)
-        reply = getattr(self.assistant.engine.planner, "last_reply", None)
-        if reply is not None and self.assistant.chat.last_choice:
-            self._out(f"  ({self.assistant.chat.last_choice}, {reply.seconds:.1f}s)")
-            self.assistant.engine.planner.last_reply = None
+        events: list[TurnEvent] = []
+
+        def emit(event: TurnEvent) -> None:
+            events.append(event)
+            self._show_event(event)
+
+        with self._turn:
+            prepare = getattr(self.speaker, "prepare", None)
+            if prepare is not None:
+                prepare()  # load the voice while NEXUS thinks, so the answer is heard sooner
+            self.assistant.engine.handle(user, emit)
+            reply = getattr(self.assistant.engine.planner, "last_reply", None)
+            if reply is not None and self.assistant.chat.last_choice:
+                self._out(f"  ({self.assistant.chat.last_choice}, {reply.seconds:.1f}s)")
+                self.assistant.engine.planner.last_reply = None
+        return events
 
     def _show_event(self, event: TurnEvent) -> None:
         if isinstance(event, Say):
@@ -245,8 +268,10 @@ class Console:
             elif message != "transcribing":
                 self._out(f"  ({message})")
 
+        wake = self._wake
         try:
-            heard = voice.listen(on_status=status)
+            with (wake.paused("push-to-talk is listening") if wake is not None else nullcontext()):
+                heard = voice.listen(on_status=status)
         except ListeningCancelled:
             self._out("  (cancelled)")
             return
@@ -261,7 +286,11 @@ class Console:
             self._out(f"  (voice) Voice input failed unexpectedly ({type(exc).__name__}: {exc}). "
                       "Typing still works; details are in var/logs/nexus.log.")
             return
-        t = voice.last_timings
+        if self._show_heard(heard):
+            self._chat(heard.text, heard=heard)
+
+    def _show_heard(self, heard) -> bool:
+        t = self._voice.last_timings
         language = heard.transcript.language or "?"
         romanized = f' -> "{heard.text}"' if heard.text != heard.original else ""
         confidence = f"{heard.confidence:.2f}" if heard.confidence is not None else "?"
@@ -272,7 +301,63 @@ class Console:
             self._out(f"  (understood by sound: {'; '.join(guesses)} - NEXUS will ask before acting)")
         if heard.truncated:
             self._out("  (you spoke for the maximum length, so the end may be cut off)")
-        self._chat(heard.text, heard=heard)
+        return bool(heard.text.strip())
+
+    # --- wake word ------------------------------------------------------------------
+
+    def _wake_heard(self, heard, hit) -> bool:
+        """A request after "Nexus" (or an answer to NEXUS's question), from the wake-word thread.
+        True if NEXUS asked something back, so the answer is listened for without "Nexus"."""
+        if not self._show_heard(heard):
+            self._out("  (that was only \"Nexus\" - say the request after it)")
+            return False
+        events = self._chat(heard.text, heard=heard)
+        asked = any(isinstance(e, ConfirmationRequest) for e in events)
+        says = [e for e in events if isinstance(e, Say)]
+        if says and (says[-1].kind is SayKind.CONFIRM or says[-1].text.rstrip().endswith("?")):
+            asked = True
+        return asked
+
+    def _wake_event(self, event) -> None:
+        if event.kind == "woke":
+            hit = event.hit
+            how = f' ("{hit.heard}")' if hit is not None and hit.heard else ""
+            self._out(f"\n  (Nexus{how} - listening)")
+        elif event.kind == "listening":
+            self._out(f"  ({event.message} - /wake off to stop)")
+        elif event.message:
+            prefix = "wake word: " if event.kind == "problem" else ""
+            self._out(f"  ({prefix}{event.message})")
+
+    def _wake_cmd(self, rest: str) -> None:
+        wake = self._wake
+        if wake is None:
+            note = getattr(self.assistant, "wake_note", "") or "the AI layer is off"
+            self._out(f"  The wake word isn't available: {note}.")
+            return
+        cmd = rest.strip().lower()
+        if cmd in ("on", "off"):
+            wake.set_enabled(cmd == "on")
+            self._out("  Wake word on: say \"Nexus\" and your request." if cmd == "on"
+                      else "  Wake word off: the microphone is only used for push-to-talk (Enter).")
+            return
+        if cmd == "test":
+            wake.test(20)
+            self._out("  For 20 seconds every detection is shown and nothing is acted on. Say \"Nexus\" a few "
+                      "times, and talk normally too.")
+            return
+        if cmd:
+            self._out("  usage: /wake   |   /wake on | off | test")
+            return
+        st = wake.status()
+        self._out(f"  wake word: {st['state']}" + (f" ({st['paused']})" if st["paused"] else ""))
+        if st["detector"]:
+            self._out(f"  detector: {st['detector']}   microphone: {st['microphone'] or '-'}   "
+                      f"woken {st['wakes']} time(s)")
+        for why in getattr(wake, "skipped", []):
+            self._out(f"  not used: {why}")
+        if st["problem"]:
+            self._out(f"  problem: {st['problem']}")
 
     def _mic(self, rest: str) -> None:
         voice = self._voice
@@ -383,7 +468,8 @@ class Console:
             size = f"{m['vram_mb']} MB VRAM" if m["placement"] == "gpu" else f"{m['ram_mb']} MB RAM"
             tail = f", unloads in {m['unloads_in_s']}s" if m["unloads_in_s"] is not None else ""
             if m["kept_loaded"]:
-                tail = ", kept loaded (your setting)"
+                tail = (", held while listening for \"Nexus\"" if m["kind"] == "wakeword"
+                        else ", kept loaded (your setting)")
             if m["name"] not in a.capabilities.supported_models:
                 tail += ", too big for this device"
             self._out(f"    {m['name']:<24} {state:<11} ~{size}{tail}")
@@ -394,6 +480,14 @@ class Console:
             scan = voice.mics.last_scan or voice.mics.scan()
             mic = scan.chosen.name if scan.chosen else "no microphone connected"
             self._out(f"  voice input: {mic}   (/listen or Enter to talk, /mic for details)")
+        wake = getattr(a, "wake", None)
+        if wake is None:
+            self._out(f"  wake word: off ({getattr(a, 'wake_note', '') or 'not configured'})")
+        else:
+            st = wake.status()
+            self._out(f"  wake word: {st['state']}" + (f" ({st['paused'] or st['problem']})"
+                                                       if st["paused"] or st["problem"] else "")
+                      + (f" - {st['detector']}" if st["detector"] else "") + "   (/wake)")
         speaker = getattr(a, "speaker", None)
         if getattr(a, "speech_note", ""):
             self._out(f"  voice output: off ({a.speech_note})")

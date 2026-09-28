@@ -151,3 +151,32 @@ game_mode = "quiet"
 
 # Longer replies are spoken up to about this many characters, then "The rest is on the screen."
 max_spoken_chars = 600
+
+[wake]
+# Wake word: say "Nexus" and your request ("Nexus, GTA chala de") instead of pressing Enter.
+# The microphone is then read all the time, but only on this PC: audio is examined in memory,
+# never saved, never sent anywhere. After "Nexus" the request goes through exactly the same
+# security policy and confirmations as typed text. /wake off turns it off; push-to-talk still works.
+enabled = true
+
+# "auto": the trained "Nexus" model (openwakeword) if models/wake/<model>.onnx exists, else Whisper.
+#   openwakeword  ~2% of one CPU core, reacts in ~0.2 s. Train it: scripts/train_wake_model.py
+#   whisper       no training needed: the start of each burst of speech (<= 1.6 s) is checked by a
+#                 light Whisper model - a short transcription per burst, at most max_checks_per_minute.
+detector = "auto"
+model = "nexus"
+threshold = 0.5        # openwakeword: higher = fewer false wake-ups, more missed "Nexus"
+patience = 1           # openwakeword: 80 ms frames in a row above the threshold
+whisper_model = "base" # the game-mode speech model (already downloaded); "tiny" is lighter
+max_checks_per_minute = 20
+
+# "Nexus" ... pause: a short chime, then NEXUS waits this long for the request.
+command_timeout_seconds = 6
+chime = true
+# When NEXUS asks something (yes/no, which one?), answer within this many seconds without "Nexus". 0 = off.
+follow_up_seconds = 6
+# Listen for "Nexus" while NEXUS is talking (it may then hear itself: without echo cancellation,
+# only turn this on with headphones).
+barge_in = false
+# While a game runs: "listen" (both detectors run on the CPU) or "off".
+game_mode = "listen"

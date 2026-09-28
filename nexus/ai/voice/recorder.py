@@ -97,18 +97,30 @@ class Recorder:
         self._clock = clock
 
     def record(self, stream: CaptureStream, *, cancel: threading.Event | None = None,
-               on_speech: Callable[[], None] | None = None) -> Utterance:
+               on_speech: Callable[[], None] | None = None, noise_floor: float | None = None,
+               pre_roll: bytes = b"", lead_in: bytes = b"", lead_in_silence_ms: int = 0) -> Utterance:
+        """One utterance from `stream`. After a wake word (nexus/ai/voice/wake.py) the stream is already
+        open and measured: `noise_floor` skips the calibration, `pre_roll` is the audio just before
+        recording started, and `lead_in` is speech already in progress (it ended `lead_in_silence_ms` ago)."""
         cfg = self.cfg
         rate = stream.sample_rate
         frame_bytes = max(2, rate * cfg.frame_ms // 1000 * 2)
         vad = EnergyVAD(cfg)
+        if noise_floor is not None or lead_in:
+            vad.noise = noise_floor or 0.0  # 0: the fixed minimum level decides
         # Speech can't be detected while the noise is measured, so the lead-in also covers that time.
-        pre_roll: deque[bytes] = deque(maxlen=max(1, (cfg.pre_roll_ms + cfg.calibration_ms) // cfg.frame_ms))
+        before: deque[bytes] = deque(maxlen=max(1, (cfg.pre_roll_ms + cfg.calibration_ms) // cfg.frame_ms))
+        before.extend(pre_roll[i:i + frame_bytes] for i in range(0, len(pre_roll) - frame_bytes + 1, frame_bytes))
+        pre_roll = before  # type: ignore[assignment]
         recent: deque[bool] = deque(maxlen=max(1, cfg.start_window_ms // cfg.frame_ms))
         speech: list[bytes] = []
         speaking = False
         voiced_ms = silence_ms = frames = zero_frames = 0
         started_at = 0
+        if lead_in:
+            speech = [lead_in[i:i + frame_bytes] for i in range(0, len(lead_in), frame_bytes)]
+            speaking, started_at, silence_ms = True, -len(speech), lead_in_silence_ms
+            voiced_ms = sum(cfg.frame_ms for f in speech if vad.voiced(level(f), speaking=True))
         pending = b""
         last_audio = self._clock()
         while True:

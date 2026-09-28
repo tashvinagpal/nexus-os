@@ -86,7 +86,7 @@ def load_ai_settings(file: Path) -> AISettings:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"cannot read {file}: {exc}") from exc
     for section in data:
-        if section not in ("ai", "resources", "apps", "voice", "tts"):
+        if section not in ("ai", "resources", "apps", "voice", "tts", "wake"):
             raise ConfigError(f"{file}: unknown section [{section}]")
     ai = _checked(data.get("ai", {}), _AI_KEYS, "ai", file)
     res = _checked(data.get("resources", {}), _RES_KEYS, "resources", file)
@@ -265,3 +265,56 @@ def _checked(values: Any, spec: dict[str, type], name: str, file: Path) -> dict[
         if not isinstance(value, typ) or (typ is int and isinstance(value, bool)):
             raise ConfigError(f"{file}: '{name}.{key}' must be {typ.__name__}")
     return dict(values)
+
+
+# --- wake word ([wake] in config/nexus.toml) ----------------------------------------------
+
+@dataclass(frozen=True)
+class WakeSettings:
+    enabled: bool = True
+    detector: str = "auto"             # auto (openwakeword if its model exists, else whisper) | openwakeword | whisper
+    model: str = "nexus"               # models/wake/<model>.onnx
+    threshold: float = 0.5
+    patience: int = 1                  # frames in a row above the threshold
+    whisper_model: str = "base"
+    max_checks_per_minute: int = 20
+    command_timeout_seconds: int = 6
+    follow_up_seconds: int = 6
+    barge_in: bool = False
+    game_mode: str = "listen"          # listen | off
+    chime: bool = True
+
+
+_WAKE_KEYS = {"enabled": bool, "detector": str, "model": str, "threshold": float, "patience": int,
+              "whisper_model": str, "max_checks_per_minute": int, "command_timeout_seconds": int,
+              "follow_up_seconds": int, "barge_in": bool, "game_mode": str, "chime": bool}
+_WAKE_CHOICES = {"detector": ("auto", "openwakeword", "whisper"), "game_mode": ("listen", "off")}
+_WAKE_RANGES = {"threshold": (0.05, 0.99), "patience": (1, 10), "max_checks_per_minute": (1, 120),
+                "command_timeout_seconds": (2, 30), "follow_up_seconds": (0, 30)}
+
+
+def load_wake_settings(file: Path) -> WakeSettings:
+    """The [wake] section of config/nexus.toml (same fail-closed rules as the rest of the file)."""
+    if not file.exists():
+        return WakeSettings()
+    try:
+        with file.open("rb") as f:
+            raw = tomllib.load(f).get("wake", {})
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"cannot read {file}: {exc}") from exc
+    if isinstance(raw, dict) and isinstance(raw.get("threshold"), int) and not isinstance(raw["threshold"], bool):
+        raw = {**raw, "threshold": float(raw["threshold"])}
+    wake = _checked(raw, _WAKE_KEYS, "wake", file)
+    for key, choices in _WAKE_CHOICES.items():
+        if key in wake and wake[key] not in choices:
+            raise ConfigError(f"{file}: wake.{key} must be one of {', '.join(choices)}")
+    for key, (low, high) in _WAKE_RANGES.items():
+        if key in wake and not low <= wake[key] <= high:
+            raise ConfigError(f"{file}: wake.{key} must be between {low} and {high}")
+    if "model" in wake and not re.fullmatch(r"[A-Za-z0-9_.-]+", wake["model"]):
+        raise ConfigError(f"{file}: wake.model must be a file name in models/wake/ without .onnx")
+    from nexus.ai.voice.whisper import WHISPER_MODELS
+
+    if wake.get("whisper_model", "base") not in WHISPER_MODELS:
+        raise ConfigError(f"{file}: wake.whisper_model must be one of {', '.join(WHISPER_MODELS)}")
+    return WakeSettings(**wake)

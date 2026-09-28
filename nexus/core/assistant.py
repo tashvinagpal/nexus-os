@@ -14,7 +14,7 @@ from nexus.ai.providers.ollama import OllamaChat
 from nexus.ai.router import FastPathRouter
 from nexus.ai.voice import SilentTTS, TTSProvider
 from nexus.ai.voice.speaker import Speaker
-from nexus.core.config import AISettings, TTSSettings, VoiceSettings
+from nexus.core.config import AISettings, TTSSettings, VoiceSettings, WakeSettings
 from nexus.core.resources import Placement, ResourceManager, ResourceState
 from nexus.core.runtime import Runtime
 from nexus.security.identity import DeviceKey, NexusIdentity
@@ -34,6 +34,8 @@ class Assistant:
     voice: object = None      # VoiceInput, or None when voice input is turned off
     voice_note: str = ""      # why voice input is off
     speech_note: str = ""     # why NEXUS answers in text only (no voice output)
+    wake: object = None       # WakeListener (not started yet - the front end starts it), or None
+    wake_note: str = ""       # why there is no wake word
 
 
 def _stt_backends(runtime: Runtime, voice: VoiceSettings | None) -> list:
@@ -115,8 +117,52 @@ def _voice_input(runtime: Runtime, voice: VoiceSettings, stt_backends: list, res
                       device_poll_s=voice.device_poll_seconds, fast_path=fast_path, names=_app_names(runtime))
 
 
+# Measured RAM of a Whisper worker per model (docs/voice.md); models not measured get the next size up.
+_WHISPER_RAM_MB = {"tiny": 200, "base": 320, "small": 560, "medium": 1400, "large-v3": 3200, "large-v3-turbo": 1800}
+
+
+def _wake_listener(runtime: Runtime, wake: WakeSettings | None, voice_input, voice: VoiceSettings,
+                   stt_backends: list, resources: ResourceManager, speaker: Speaker) -> tuple[object, str]:
+    """The wake-word listener (not started), or (None, why not)."""
+    if wake is None or not wake.enabled:
+        return None, "the wake word is turned off in config/nexus.toml ([wake] enabled)"
+    if voice_input is None:
+        return None, "voice input is off, so there is no wake word either"
+    from nexus.ai.voice.wake import OpenWakeWordDetector, WhisperWakeDetector
+    from nexus.ai.voice.wake_listener import WakeListener, WakeOptions, chime_clip
+    from nexus.ai.voice.whisper import WhisperSTT
+
+    detectors: list = []
+    if wake.detector in ("auto", "openwakeword"):
+        folder = runtime.settings.project_root / "models" / "wake"
+        detectors.append(OpenWakeWordDetector(folder / f"{wake.model}.onnx", folder / "melspectrogram.onnx",
+                                              folder / "embedding_model.onnx", resources,
+                                              threshold=wake.threshold, patience=wake.patience))
+    if wake.detector in ("auto", "whisper"):
+        # The same worker as push-to-talk when it is the same model; otherwise a light one of its own.
+        backend = next((b for b in stt_backends if b.model == wake.whisper_model), None)
+        if backend is None:
+            backend = WhisperSTT(wake.whisper_model, threads=2, ram_mb=_WHISPER_RAM_MB[wake.whisper_model],
+                                 idle_unload_s=600, languages=voice.languages, timeout_s=10,
+                                 log_file=runtime.settings.data_dir / "logs" / "stt-worker.log")
+            resources.register(backend)
+        detectors.append(WhisperWakeDetector(backend, resources, max_checks_per_minute=wake.max_checks_per_minute))
+    options = WakeOptions(command_timeout_s=wake.command_timeout_seconds, follow_up_s=wake.follow_up_seconds,
+                          barge_in=wake.barge_in, game_mode=wake.game_mode, chime=wake.chime)
+    sink = getattr(speaker, "sink", None)
+
+    def chime() -> None:
+        if sink is not None and sink.ready()[0]:
+            sink.play(chime_clip()).wait(1.0)
+
+    return WakeListener(voice_input, detectors, resources, on_heard=lambda heard, hit: False,
+                        speaking=lambda: speaker.speaking, stop_speaking=speaker.stop,
+                        chime=chime if sink is not None else None, options=options), ""
+
+
 def create_assistant(runtime: Runtime, ai: AISettings, *, tts: TTSProvider | None = None,
-                     voice: VoiceSettings | None = None, speech: TTSSettings | None = None) -> Assistant:
+                     voice: VoiceSettings | None = None, speech: TTSSettings | None = None,
+                     wake: WakeSettings | None = None) -> Assistant:
     idle = math.inf if ai.keep_llm_loaded else ai.llm_idle_unload_seconds
     providers = [OllamaChat(o.model, placement=Placement(o.placement), ram_mb=o.ram_mb, vram_mb=o.vram_mb,
                             idle_unload_s=idle, base_url=ai.ollama_url) for o in ai.llm]  # best first
@@ -176,6 +222,9 @@ def create_assistant(runtime: Runtime, ai: AISettings, *, tts: TTSProvider | Non
         else:
             voice_input, voice_note = _voice_input(runtime, voice, stt_backends, resources, context,
                                                    fast_path=lambda text: router.route(text) is not None), ""
+    wake_listener, wake_note = (None, "voice input is off, so there is no wake word either")
+    if voice_input is not None:
+        wake_listener, wake_note = _wake_listener(runtime, wake, voice_input, voice, stt_backends, resources, speaker)
     resources.start_housekeeping()
     return Assistant(ai, caps, device, nexus, resources, chat, engine, speaker, voice_input, voice_note,
-                     speech_note)
+                     speech_note, wake_listener, wake_note)

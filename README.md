@@ -4,7 +4,7 @@ A computer operating system with an AI-native control layer. Built in stages:
 a normal Windows application first (v0.1), then a Linux-based environment
 (v0.9), then a bootable OS (v1.0). See [docs/architecture.md](docs/architecture.md).
 
-## Status: v0.1 - subsystems 1-6 done (Subsystems 4 and 5 frozen), acceptance criteria automated
+## Status: v0.1 - subsystems 1-7 done (4, 5 and 6 frozen; 7 awaiting a real-microphone test), acceptance criteria automated
 
 - **Apps & games** - discovers what's installed (Start menu, Desktop, Store,
   Steam, Epic, Rockstar); "open Chrome" / "GTA chala de" launch the real program
@@ -25,6 +25,14 @@ a normal Windows application first (v0.1), then a Linux-based environment
   local, CPU): first sound ~0.7 s, markdown/links/code not read out, Hindi and Hinglish
   through a Hindi voice; typing or talking interrupts it, quiet while you game, text
   always shown. Speech can never run anything. ([docs/tts.md](docs/tts.md))
+
+- **Wake word** - say "Nexus, GTA chala de" with no key press. An always-on listener
+  (in memory only, nothing saved or sent) wakes on "Nexus" and hears the rest of the
+  sentence; "Nexus" on its own gets a chime and waits for the request; NEXUS's
+  questions can be answered without "Nexus". Two detectors: a light Whisper check on
+  bursts of speech (works now) and NEXUS's own trained "Nexus" model (openWakeWord
+  format, ~2% of one CPU core), trained locally from Kokoro voices and your own
+  recordings. ([docs/wake.md](docs/wake.md))
 
 - **Action Kernel** - typed tools, deterministic security policy, confirmations,
   hash-chained audit log. No shell tool exists. ([docs/action-kernel.md](docs/action-kernel.md))
@@ -55,6 +63,11 @@ py -3.12 -m venv .venv          # or: python -m venv .venv  (3.10+ works)
 # voice output (optional, ~10 MB of packages with [voice] installed) and its model:
 .\.venv\Scripts\python.exe -m pip install -e ".[tts]"
 .\.venv\Scripts\python.exe scripts\get_tts_model.py fp32      # 310 MB model + 26 MB voices
+# wake word: works with the Whisper base model above; for the trained "Nexus" model (~20 min, CPU):
+.\.venv\Scripts\python.exe -m pip install -e ".[tts,wake-train]"
+.\.venv\Scripts\python.exe scripts\get_wake_model.py              # 2.4 MB shared feature networks
+.\.venv\Scripts\python.exe scripts\train_wake_model.py            # -> models\wake\nexus.onnx
+.\.venv\Scripts\python.exe scripts\record_wake_samples.py         # optional: your voice, then train with --samples
 ```
 
 Needs [Ollama](https://ollama.com) with `llama3.1:8b` and `llama3.2` for the
@@ -76,6 +89,8 @@ you> Chrome is my browser                         -> then "open my browser"
 you>                                            (Enter on an empty line = push-to-talk; Ctrl+C cancels)
 you> /mic                                        microphones found, which one is used and why
 you> /tts   /tts off|on   /tts test   /stop       voice output: status, on/off, test sentence, stop speaking
+     "Nexus, open chrome"                        wake word: no key needed
+you> /wake   /wake off|on   /wake test            wake word: status, on/off, show detections without acting
 you> /status   /apps games   /aliases   /memory   /forget <id>   /gamemode on|off   /unload   /tools   /audit verify
 ```
 
@@ -90,6 +105,7 @@ you> /status   /apps games   /aliases   /memory   /forget <id>   /gamemode on|of
 .\.venv\Scripts\python.exe -m pytest -m tts           # the real voice model (nothing played)
 .\.venv\Scripts\python.exe -m pytest -m speaker       # plays through your speakers
 .\.venv\Scripts\python.exe scripts\tts_check.py        # voice output report on your real output device
+.\.venv\Scripts\python.exe -m pytest -m wake          # wake word with the real models (Kokoro speech, no mic)
 .\.venv\Scripts\python.exe scripts\eval_planner.py llama3.1:8b@gpu --catalog production
 .\.venv\Scripts\python.exe scripts\eval_apps.py       # discovery accuracy on this PC (read-only)
 ```

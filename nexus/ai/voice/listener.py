@@ -20,8 +20,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
-from typing import Callable, Iterable
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Iterable
 
 from nexus.ai.conversation.responder import parse_confirmation
 from nexus.ai.voice.base import ListeningCancelled, NoSpeech, STTUnavailable, Transcript, Unintelligible
@@ -30,7 +30,7 @@ from nexus.ai.voice.recorder import Recorder, Utterance, VADConfig
 from nexus.ai.voice.stt import HybridSTT
 from nexus.ai.voice.text import clean, likely_invented
 from nexus.core.resources import ResourceManager, ResourceState
-from nexus.system.audio.capture import CaptureBackend
+from nexus.system.audio.capture import CaptureBackend, CaptureStream
 from nexus.system.audio.devices import MicrophoneManager, MicScan
 from nexus.system.audio.errors import (MicrophoneDenied, MicrophoneLost, MicrophoneUnavailable, NoMicrophone)
 from nexus.system.platform.base import AudioInput
@@ -101,6 +101,30 @@ class VoiceInput:
         done = time.perf_counter()
         self.last_timings = {"recording_s": recorded - started, "transcribing_s": done - recorded,
                              "audio_s": utterance.clip.seconds}
+        return self._heard(utterance, transcript, mic)
+
+    def listen_on(self, stream: CaptureStream, mic: AudioInput, *, cancel: threading.Event | None = None,
+                  no_speech_timeout_s: float | None = None, **record: Any) -> Heard:
+        """One utterance from a stream that is already open (after the wake word - see wake_listener.py).
+        `record` goes to Recorder.record (noise_floor, lead_in, lead_in_silence_ms, pre_roll)."""
+        recorder = self.recorder
+        if no_speech_timeout_s is not None:
+            recorder = Recorder(replace(self.vad, no_speech_timeout_s=no_speech_timeout_s))
+        started = time.perf_counter()
+        try:
+            with self.resources.busy(ResourceState.LISTENING):
+                self.stt.prepare()
+                utterance = recorder.record(stream, cancel=cancel, **record)
+                recorded = time.perf_counter()
+                transcript = self.stt.transcribe(utterance.clip, language_hint=self.language, cancel=cancel)
+        except KeyboardInterrupt:
+            raise ListeningCancelled("Cancelled.") from None
+        self.mics.mark_working(mic)
+        self.last_timings = {"recording_s": recorded - started, "transcribing_s": time.perf_counter() - recorded,
+                             "audio_s": utterance.clip.seconds}
+        return self._heard(utterance, transcript, mic)
+
+    def _heard(self, utterance: Utterance, transcript: Transcript, mic: AudioInput) -> Heard:
         self.last_utterance = utterance  # in memory only, for diagnostics (e.g. speech level)
         original = self._accept(transcript)
         understood = self.normalizer(original) if self.romanize else None
